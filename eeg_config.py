@@ -29,6 +29,10 @@ class Config:
     SUBJECT_INDEPENDENT = True
     CLIP_INDEPENDENT = True
     
+    # LOSO (Leave-One-Subject-Out) training
+    USE_LOSO = True  # Set to True to enable LOSO cross-validation
+    LOSO_SUBJECT = None  # Specify subject ID to leave out (None = iterate through all subjects)
+    
     # Stratified split parameters
     USE_STRATIFIED_GROUP_SPLIT = True
     MIN_SAMPLES_PER_CLASS = 10

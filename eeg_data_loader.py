@@ -630,3 +630,122 @@ def create_data_splits(y_labels, subject_ids, config, train_ratio=0.70, val_rati
         print(f"   {split_name.capitalize()} class distribution: {dict(dist)}")
     
     return split_indices
+
+
+# ==================================================
+# LOSO (LEAVE-ONE-SUBJECT-OUT) SPLITTING
+# ==================================================
+
+def create_loso_splits_and_window(recordings, label_to_id, config, test_subject=None):
+    """
+    Create Leave-One-Subject-Out (LOSO) splits for cross-validation.
+    One subject is held out for testing, remaining subjects split for train/val.
+    
+    Args:
+        recordings: List of recording dictionaries from load_eeg_data
+        label_to_id: Dictionary mapping label names to integers
+        config: Configuration object
+        test_subject: Subject ID to leave out for testing (None = return all subjects for iteration)
+    
+    Returns:
+        If test_subject is provided:
+            X_raw, y_labels, subject_ids, split_indices
+        If test_subject is None:
+            List of all unique subject IDs (for iterating)
+    """
+    # Extract all unique subjects
+    all_subjects = sorted(list(set(r['subject'] for r in recordings)))
+    
+    # If no test_subject provided, return list of subjects for iteration
+    if test_subject is None:
+        print(f"\n📋 Available subjects for LOSO: {len(all_subjects)}")
+        print(f"   Subjects: {all_subjects}")
+        return all_subjects
+    
+    # Validate test_subject exists
+    if test_subject not in all_subjects:
+        raise ValueError(f"Subject '{test_subject}' not found in dataset. Available: {all_subjects}")
+    
+    print("\n" + "="*80)
+    print(f"LOSO CROSS-VALIDATION: TESTING ON SUBJECT {test_subject}")
+    print("="*80)
+    
+    # Extract metadata
+    recording_subjects = np.array([r['subject'] for r in recordings])
+    
+    # Split recordings by subject
+    test_rec_mask = (recording_subjects == test_subject)
+    train_val_rec_mask = ~test_rec_mask
+    
+    # Further split train_val into train and val (80/20 from remaining subjects)
+    train_val_subjects = [s for s in all_subjects if s != test_subject]
+    np.random.shuffle(train_val_subjects)
+    
+    n_val_subjects = max(1, int(len(train_val_subjects) * 0.2))
+    val_subjects = train_val_subjects[:n_val_subjects]
+    train_subjects = train_val_subjects[n_val_subjects:]
+    
+    train_rec_mask = np.isin(recording_subjects, train_subjects)
+    val_rec_mask = np.isin(recording_subjects, val_subjects)
+    
+    print(f"  Test subject: {test_subject} ({np.sum(test_rec_mask)} recordings)")
+    print(f"  Train subjects: {len(train_subjects)} ({np.sum(train_rec_mask)} recordings)")
+    print(f"  Val subjects: {len(val_subjects)} ({np.sum(val_rec_mask)} recordings)")
+    
+    # Window each split
+    win_samples = int(config.EEG_WINDOW_SEC * config.EEG_FS)
+    step_samples = int(win_samples * (1.0 - config.EEG_OVERLAP))
+    
+    print(f"\n  Windowing parameters:")
+    print(f"     Window size: {config.EEG_WINDOW_SEC}s ({win_samples} samples)")
+    print(f"     Overlap: {config.EEG_OVERLAP*100:.0f}%")
+    
+    all_windows = []
+    all_labels = []
+    all_subjects_out = []
+    window_split_ids = []
+    
+    split_map = {'train': 0, 'val': 1, 'test': 2}
+    
+    for split_name, rec_mask in [('train', train_rec_mask), 
+                                  ('val', val_rec_mask), 
+                                  ('test', test_rec_mask)]:
+        split_recordings = [recordings[i] for i in range(len(recordings)) if rec_mask[i]]
+        split_window_count = 0
+        
+        for rec in split_recordings:
+            signal = rec['signal']
+            L = len(signal)
+            
+            for start in range(0, L - win_samples + 1, step_samples):
+                window = signal[start:start + win_samples]
+                if len(window) == win_samples:
+                    all_windows.append(window)
+                    all_labels.append(label_to_id[rec['label']])
+                    all_subjects_out.append(rec['subject'])
+                    window_split_ids.append(split_map[split_name])
+                    split_window_count += 1
+        
+        print(f"  {split_name.capitalize()}: {len(split_recordings)} recordings → {split_window_count} windows")
+    
+    # Create split indices
+    window_split_ids = np.array(window_split_ids)
+    split_indices = {
+        'train': np.where(window_split_ids == 0)[0],
+        'val': np.where(window_split_ids == 1)[0],
+        'test': np.where(window_split_ids == 2)[0]
+    }
+    
+    # Convert to arrays
+    X_raw = np.stack(all_windows).astype(np.float32)
+    y_labels = np.array(all_labels, dtype=np.int64)
+    subject_ids = np.array(all_subjects_out)
+    
+    print(f"\n✅ Windowed data shape: {X_raw.shape}")
+    print(f"\n📋 Split Summary:")
+    for split_name, indices in split_indices.items():
+        labels_split = y_labels[indices]
+        dist = Counter(labels_split)
+        print(f"   {split_name.capitalize()}: {len(indices)} windows, class dist: {dict(dist)}")
+    
+    return X_raw, y_labels, subject_ids, split_indices
