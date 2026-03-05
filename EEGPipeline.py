@@ -67,6 +67,9 @@ print(f"Device: {config.DEVICE}")
 
 def main():
     """EEG-only emotion recognition pipeline."""
+    # Validate configuration to prevent data leakage
+    config.validate_config()
+    
     print("=" * 80)
     print("EEG-ONLY EMOTION RECOGNITION PIPELINE")
     print("=" * 80)

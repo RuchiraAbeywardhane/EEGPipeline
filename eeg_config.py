@@ -26,8 +26,19 @@ class Config:
     USE_BASELINE_REDUCTION = True  # For EEG
     
     # Data split mode
-    SUBJECT_INDEPENDENT = True
-    CLIP_INDEPENDENT = True
+    SUBJECT_INDEPENDENT = False
+    CLIP_INDEPENDENT = True  # ⚠️ MUST ALWAYS BE TRUE to prevent data leakage!
+    
+    # Validation: Raise error if misconfigured
+    @classmethod
+    def validate_config(cls):
+        """Validate configuration to prevent data leakage."""
+        if not cls.CLIP_INDEPENDENT:
+            raise ValueError(
+                "CLIP_INDEPENDENT must always be True to prevent data leakage! "
+                "Setting it to False causes windows from the same recording to appear "
+                "in both train and test sets, leading to inflated accuracy."
+            )
     
     # LOSO (Leave-One-Subject-Out) training
     USE_LOSO = True  # Set to True to enable LOSO cross-validation
