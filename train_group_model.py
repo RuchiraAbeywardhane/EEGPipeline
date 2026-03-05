@@ -361,6 +361,24 @@ def create_group_splits_clip_independent(y_labels, subjects, clip_ids, config, v
     for clip_id, info in clip_info.items():
         clips_by_class[info['label']].append(clip_id)
     
+    # Check if we have enough clips for proper splitting
+    min_clips_per_class = min(len(clips_by_class[cid]) for cid in range(config.NUM_CLASSES) if len(clips_by_class[cid]) > 0)
+    
+    if min_clips_per_class < 3:
+        print(f"\n⚠️  WARNING: Very few clips per class (min={min_clips_per_class})")
+        print("   With clip-independent splitting, you need at least 3 clips per class")
+        print("   for train/val/test splits.")
+        print("\n💡 SOLUTIONS:")
+        print("   1. Use --mode loso (Leave-One-Subject-Out) instead")
+        print("   2. Remove --clip_independent flag to use window-based splits")
+        print("   3. Add more subjects to the group")
+        
+        raise ValueError(
+            f"Insufficient clips for clip-independent splitting!\n"
+            f"Minimum clips per class: {min_clips_per_class} (need at least 3)\n"
+            f"Class distribution: {dict((k, len(v)) for k, v in clips_by_class.items())}"
+        )
+    
     # Split clips by class (stratified)
     train_clips, val_clips, test_clips = [], [], []
     
@@ -375,9 +393,30 @@ def create_group_splits_clip_independent(y_labels, subjects, clip_ids, config, v
         # Shuffle clips for random split
         np.random.shuffle(class_clip_list)
         
-        # Calculate split points
-        n_test = max(1, int(n_class_clips * test_ratio))
-        n_val = max(1, int(n_class_clips * val_ratio))
+        # Calculate split points - ensure at least 1 clip for training
+        if n_class_clips >= 3:
+            # Normal case: enough clips for train/val/test
+            n_test = max(1, int(n_class_clips * test_ratio))
+            n_val = max(1, int(n_class_clips * val_ratio))
+            n_train = n_class_clips - n_test - n_val
+            
+            # Ensure training set is not empty
+            if n_train == 0:
+                # Reduce test/val to ensure train has at least 1 clip
+                n_test = max(1, int(n_class_clips * 0.33))
+                n_val = max(1, int(n_class_clips * 0.33))
+                n_train = n_class_clips - n_test - n_val
+                
+                if n_train == 0:
+                    # Last resort: 1 clip each
+                    n_train = 1
+                    n_val = 1 if n_class_clips >= 3 else 0
+                    n_test = n_class_clips - n_train - n_val
+        else:
+            # Very few clips: adjust split accordingly
+            n_train = max(1, n_class_clips - 2) if n_class_clips >= 2 else n_class_clips
+            n_val = 1 if n_class_clips >= 3 else 0
+            n_test = n_class_clips - n_train - n_val
         
         test_clips.extend(class_clip_list[:n_test])
         val_clips.extend(class_clip_list[n_test:n_test+n_val])
@@ -402,6 +441,14 @@ def create_group_splits_clip_independent(y_labels, subjects, clip_ids, config, v
     print(f"   Train: {len(train_clips)} clips, {len(split_indices['train'])} windows")
     print(f"   Val:   {len(val_clips)} clips, {len(split_indices['val'])} windows")
     print(f"   Test:  {len(test_clips)} clips, {len(split_indices['test'])} windows")
+    
+    # Verify we have training data
+    if len(train_clips) == 0:
+        raise ValueError(
+            "No training clips available after split!\n"
+            "This happens when you have too few clips per class.\n"
+            "Try using --mode loso or remove --clip_independent flag."
+        )
     
     # Verify no clip overlap
     train_clips_set = set(train_clips)
