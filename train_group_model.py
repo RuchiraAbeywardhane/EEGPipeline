@@ -304,7 +304,7 @@ def create_group_splits(y_labels, subjects, clip_ids, config, val_ratio=0.15, te
     print(f"\n📊 Window Distribution:")
     print(f"   Train: {len(split_indices['train'])} windows")
     print(f"   Val:   {len(split_indices['val'])} windows")
-    print.f"   Test:  {len(split_indices['test'])} windows")
+    print(f"   Test:  {len(split_indices['test'])} windows")
     
     return split_indices
 
