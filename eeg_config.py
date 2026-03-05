@@ -41,7 +41,7 @@ class Config:
             )
     
     # LOSO (Leave-One-Subject-Out) training
-    USE_LOSO = True  # Set to True to enable LOSO cross-validation
+    USE_LOSO = False  # Set to True to enable LOSO cross-validation
     LOSO_SUBJECT = None  # Specify subject ID to leave out (None = iterate through all subjects)
     
     # Stratified split parameters
