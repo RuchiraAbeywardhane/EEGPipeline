@@ -284,12 +284,58 @@ def main():
     features_flat = eeg_X_features.reshape(N, C * F)
     
     print(f"   Feature shape: {features_flat.shape}")
+    print(f"   Total windows (with overlap): {N}")
+    
+    # Step 2.5: REMOVE OVERLAPPING WINDOWS - Keep only non-overlapping ones
+    print("\n🔧 Removing overlapping windows...")
+    print(f"   Original overlap setting: {config.EEG_OVERLAP * 100:.0f}%")
+    
+    # Group by clip_id and select non-overlapping windows
+    unique_clips = np.unique(eeg_clip_ids)
+    non_overlap_indices = []
+    
+    win_samples = int(config.EEG_WINDOW_SEC * config.EEG_FS)
+    step_samples = win_samples  # Non-overlapping: step = window size
+    
+    for clip_id in unique_clips:
+        clip_mask = (eeg_clip_ids == clip_id)
+        clip_indices = np.where(clip_mask)[0]
+        
+        # Select every Nth window to remove overlap
+        # If overlap is 75%, then windows are: 0, 1, 2, 3, 4... (overlapping)
+        # We want: 0, 4, 8, 12... (non-overlapping)
+        overlap_ratio = config.EEG_OVERLAP
+        if overlap_ratio > 0:
+            stride = int(1.0 / (1.0 - overlap_ratio))  # 75% overlap → stride of 4
+        else:
+            stride = 1
+        
+        # Select windows with stride
+        selected = clip_indices[::stride]
+        non_overlap_indices.extend(selected)
+    
+    non_overlap_indices = np.array(non_overlap_indices)
+    
+    # Filter data to keep only non-overlapping windows
+    features_flat = features_flat[non_overlap_indices]
+    eeg_y = eeg_y[non_overlap_indices]
+    eeg_subjects = eeg_subjects[non_overlap_indices]
+    eeg_clip_ids = eeg_clip_ids[non_overlap_indices]
+    
+    N_filtered = len(non_overlap_indices)
+    reduction_pct = 100.0 * (1.0 - N_filtered / N)
+    
+    print(f"   ✅ Removed {N - N_filtered} overlapping windows ({reduction_pct:.1f}% reduction)")
+    print(f"   ✅ Kept {N_filtered} non-overlapping windows")
     print(f"   Number of subjects: {len(np.unique(eeg_subjects))}")
     print(f"   Emotion distribution: {np.bincount(eeg_y)}")
     
+    # Update N to filtered count
+    N = N_filtered
+    
     # Step 3: Overall t-SNE visualization (all data)
     print("\n" + "="*80)
-    print("1️⃣  OVERALL VISUALIZATION (ALL SUBJECTS)")
+    print("1️⃣  OVERALL VISUALIZATION (ALL SUBJECTS - NON-OVERLAPPING)")
     print("="*80)
     
     embedding_all = apply_tsne(features_flat, PERPLEXITY, N_ITER, LEARNING_RATE)
