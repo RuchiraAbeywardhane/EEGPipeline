@@ -37,13 +37,8 @@ from eeg_data_loader_emognitionRaw import (
     create_data_splits
 )
 
-# # Import data loading functions for preprocessed dataset (alternative)
-# from eeg_data_loader import (
-#     load_eeg_data,
-#     extract_eeg_features,
-#     create_data_splits_and_window,
-#     create_loso_splits_and_window
-# )
+# Import deep learning feature extractor
+from eeg_deep_feature_extractor import create_feature_extractor
 
 # Import training functions from separate module
 from eeg_trainer import train_eeg_model

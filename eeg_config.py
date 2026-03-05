@@ -89,6 +89,19 @@ class Config:
     EEG_PATIENCE = 30 if CLIP_INDEPENDENT else 20
     EEG_CHECKPOINT = "best_eeg_model.pt"
     
+    # Feature Extraction Mode
+    # 'handcrafted': Use 26 handcrafted features (DE, PSD, etc.)
+    # 'deep_cnn': Use CNN to learn features from raw EEG
+    # 'deep_transformer': Use Transformer to learn features from raw EEG
+    FEATURE_EXTRACTION_MODE = 'deep_cnn'  # Options: 'handcrafted', 'deep_cnn', 'deep_transformer'
+    
+    # Deep learning feature extractor parameters
+    DEEP_FEATURE_DIM = 128  # Output dimension of deep feature extractor
+    CNN_FILTERS = [32, 64, 128]  # CNN filter sizes for each layer
+    CNN_KERNEL_SIZE = 7  # Kernel size for temporal convolutions
+    TRANSFORMER_HEADS = 4  # Number of attention heads
+    TRANSFORMER_LAYERS = 2  # Number of transformer encoder layers
+    
     # Augmentation settings
     USE_MIXUP = True  # Set to True to enable Mixup data augmentation
     MIXUP_ALPHA = 0.2  # Mixup interpolation strength (only used if USE_MIXUP=True)

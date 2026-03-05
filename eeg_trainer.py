@@ -22,6 +22,7 @@ from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 from sklearn.metrics import f1_score, classification_report
 
 from eeg_bilstm_model import SimpleBiLSTMClassifier, compute_associative_loss
+from eeg_deep_feature_extractor import create_feature_extractor
 
 
 def mixup_data(x, y, alpha=0.2):

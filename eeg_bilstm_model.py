@@ -43,63 +43,81 @@ class SimpleBiLSTMClassifier(nn.Module):
     """3-layer BiLSTM with attention for EEG emotion recognition."""
     
     def __init__(self, dx=26, n_channels=4, hidden=256, layers=3, n_classes=4, p_drop=0.4, 
-                 use_domain_adaptation=False, adaptation_mode='C'):
+                 use_domain_adaptation=False, adaptation_mode='C', use_deep_features=False):
         """
         Args:
-            dx: Number of features per channel
-            n_channels: Number of EEG channels
+            dx: Number of features per channel (26 for handcrafted, ignored for deep)
+            n_channels: Number of EEG channels (ignored for deep features)
             hidden: Hidden size for LSTM
             layers: Number of LSTM layers
             n_classes: Number of emotion classes
             p_drop: Dropout probability
             use_domain_adaptation: Whether to use domain adaptation
             adaptation_mode: 'A' (none), 'B' (associative), 'C' (adversarial), 'D' (combined)
+            use_deep_features: If True, input is (B, feature_dim) instead of (B, C, dx)
         """
         super().__init__()
         self.n_channels = n_channels
         self.hidden = hidden
         self.use_domain_adaptation = use_domain_adaptation
         self.adaptation_mode = adaptation_mode
+        self.use_deep_features = use_deep_features
         
-        self.input_proj = nn.Sequential(
-            nn.Linear(dx, hidden),
-            nn.BatchNorm1d(n_channels),
-            nn.ReLU(),
-            nn.Dropout(p_drop * 0.5)
-        )
-        
-        self.lstm = nn.LSTM(
-            input_size=hidden,
-            hidden_size=hidden,
-            num_layers=layers,
-            batch_first=True,
-            bidirectional=True,
-            dropout=p_drop if layers > 1 else 0
-        )
-        
-        d_lstm = 2 * hidden
-        self.norm = nn.LayerNorm(d_lstm)
-        self.drop = nn.Dropout(p_drop)
+        if not use_deep_features:
+            # Standard handcrafted features: (B, C, dx)
+            self.input_proj = nn.Sequential(
+                nn.Linear(dx, hidden),
+                nn.BatchNorm1d(n_channels),
+                nn.ReLU(),
+                nn.Dropout(p_drop * 0.5)
+            )
+            
+            self.lstm = nn.LSTM(
+                input_size=hidden,
+                hidden_size=hidden,
+                num_layers=layers,
+                batch_first=True,
+                bidirectional=True,
+                dropout=p_drop if layers > 1 else 0
+            )
+            
+            d_lstm = 2 * hidden
+            self.norm = nn.LayerNorm(d_lstm)
+            self.drop = nn.Dropout(p_drop)
 
-        self.attn = nn.Sequential(
-            nn.Linear(d_lstm, d_lstm // 2),
-            nn.Tanh(),
-            nn.Linear(d_lstm // 2, 1)
-        )
-        
-        self.classifier = nn.Sequential(
-            nn.Linear(d_lstm, d_lstm),
-            nn.BatchNorm1d(d_lstm),
-            nn.ReLU(),
-            nn.Dropout(p_drop),
-            nn.Linear(d_lstm, hidden),
-            nn.ReLU(),
-            nn.Dropout(p_drop),
-            nn.Linear(hidden, n_classes)
-        )
+            self.attn = nn.Sequential(
+                nn.Linear(d_lstm, d_lstm // 2),
+                nn.Tanh(),
+                nn.Linear(d_lstm // 2, 1)
+            )
+            
+            self.classifier = nn.Sequential(
+                nn.Linear(d_lstm, d_lstm),
+                nn.BatchNorm1d(d_lstm),
+                nn.ReLU(),
+                nn.Dropout(p_drop),
+                nn.Linear(d_lstm, hidden),
+                nn.ReLU(),
+                nn.Dropout(p_drop),
+                nn.Linear(hidden, n_classes)
+            )
+        else:
+            # Deep learning features: (B, feature_dim) - direct classification
+            d_lstm = hidden  # Use hidden as feature dimension
+            self.classifier = nn.Sequential(
+                nn.Linear(d_lstm, d_lstm),
+                nn.BatchNorm1d(d_lstm),
+                nn.ReLU(),
+                nn.Dropout(p_drop),
+                nn.Linear(d_lstm, hidden),
+                nn.ReLU(),
+                nn.Dropout(p_drop),
+                nn.Linear(hidden, n_classes)
+            )
         
         # Domain adaptation components
         if use_domain_adaptation:
+            d_lstm = 2 * hidden if not use_deep_features else hidden
             if adaptation_mode in ['C', 'D']:
                 # Adversarial: gradient reversal + domain discriminator
                 self.grl = GradientReversalLayer()
@@ -121,14 +139,19 @@ class SimpleBiLSTMClassifier(nn.Module):
                     nn.init.zeros_(m.bias)
     
     def forward(self, x, lambda_=1.0, return_features=False):
-        B, C, dx = x.shape
-        x = self.input_proj(x)
-        h, _ = self.lstm(x)
-        h = self.drop(self.norm(h))
+        if not self.use_deep_features:
+            # Handcrafted features path: (B, C, dx)
+            B, C, dx = x.shape
+            x = self.input_proj(x)
+            h, _ = self.lstm(x)
+            h = self.drop(self.norm(h))
 
-        scores = self.attn(h)
-        alpha = torch.softmax(scores, dim=1)
-        h_pooled = (alpha * h).sum(dim=1)  # Feature representation
+            scores = self.attn(h)
+            alpha = torch.softmax(scores, dim=1)
+            h_pooled = (alpha * h).sum(dim=1)  # Feature representation
+        else:
+            # Deep features path: (B, feature_dim) - already extracted
+            h_pooled = x
 
         logits = self.classifier(h_pooled)
         
