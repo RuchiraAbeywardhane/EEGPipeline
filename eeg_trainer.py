@@ -47,23 +47,28 @@ def mixup_criterion(criterion, pred, y_a, y_b, lam):
 def train_eeg_model(X_features, y_labels, split_indices, label_mapping, config):
     """Train EEG BiLSTM model with optional domain adaptation."""
     
-    # Determine if domain adaptation should be used
-    use_domain_adaptation = not config.SUBJECT_INDEPENDENT
+    # Domain adaptation is MORE CRITICAL for subject-independent mode!
+    # - Subject-independent: Different people = LARGE domain shift → need DA
+    # - Subject-dependent: Same person, different clips = SMALL domain shift → optional DA
+    use_domain_adaptation = config.SUBJECT_INDEPENDENT  # ✅ CORRECTED!
     
     if use_domain_adaptation:
         print("\n" + "="*80)
-        print("⚠️  SUBJECT-DEPENDENT MODE: Using Domain Adaptation")
+        print("⚠️  SUBJECT-INDEPENDENT MODE: Using Domain Adaptation")
         print("="*80)
-        print("Domain adaptation helps generalize across different recording")
-        print("sessions/clips from the same subject by treating them as")
-        print("different domains (train clips vs test clips).")
+        print("Domain adaptation helps generalize across DIFFERENT SUBJECTS")
+        print("by treating each subject as a different domain.")
+        print("This addresses the domain shift caused by inter-subject variability.")
         print("="*80)
         return train_eeg_model_with_domain_adaptation(
             X_features, y_labels, split_indices, label_mapping, config
         )
     else:
         print("\n" + "="*80)
-        print("✅ SUBJECT-INDEPENDENT MODE: Standard Training")
+        print("✅ SUBJECT-DEPENDENT MODE: Standard Training")
+        print("="*80)
+        print("Training and testing on same subject's data.")
+        print("Minimal domain shift - standard training is sufficient.")
         print("="*80)
         return train_eeg_model_standard(
             X_features, y_labels, split_indices, label_mapping, config
