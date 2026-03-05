@@ -84,10 +84,14 @@ def apply_tsne(features, perplexity=30, n_iter=1000, learning_rate=200):
     """
     print(f"   Applying t-SNE (perplexity={perplexity}, n_iter={n_iter})...")
     
+    n_samples, n_features = features.shape
+    
     # Optional: Use PCA for pre-processing if features are high-dimensional
-    if features.shape[1] > 50:
-        print(f"   Pre-processing with PCA: {features.shape[1]} -> 50 dimensions")
-        pca = PCA(n_components=50)
+    if n_features > 50:
+        # Use min(50, n_samples-1) to avoid PCA error
+        n_components = min(50, n_samples - 1)
+        print(f"   Pre-processing with PCA: {n_features} -> {n_components} dimensions")
+        pca = PCA(n_components=n_components)
         features = pca.fit_transform(features)
     
     tsne = TSNE(
