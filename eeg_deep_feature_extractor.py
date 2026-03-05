@@ -3,7 +3,7 @@ Deep Learning Feature Extractors for EEG
 =========================================
 
 This module provides CNN and Transformer-based feature extractors
-as alternatives to handcrafted features.
+as alternatives to handcrafted features, plus hybrid fusion methods.
 
 Author: Final Year Project
 Date: 2026
@@ -285,6 +285,140 @@ class TransformerFeatureExtractor(nn.Module):
 
 
 # ==================================================
+# HYBRID FEATURE FUSION
+# ==================================================
+
+class ConcatFusion(nn.Module):
+    """Simple concatenation of handcrafted and deep features."""
+    
+    def __init__(self, handcrafted_dim, deep_dim, output_dim, dropout=0.3):
+        super().__init__()
+        self.projection = nn.Sequential(
+            nn.Linear(handcrafted_dim + deep_dim, output_dim),
+            nn.LayerNorm(output_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
+    
+    def forward(self, handcrafted_feats, deep_feats):
+        """
+        Args:
+            handcrafted_feats: (B, handcrafted_dim)
+            deep_feats: (B, deep_dim)
+        
+        Returns:
+            fused_feats: (B, output_dim)
+        """
+        combined = torch.cat([handcrafted_feats, deep_feats], dim=1)
+        return self.projection(combined)
+
+
+class AttentionFusion(nn.Module):
+    """Attention-based fusion that learns to weight handcrafted vs deep features."""
+    
+    def __init__(self, handcrafted_dim, deep_dim, output_dim, dropout=0.3):
+        super().__init__()
+        
+        # Project both to same dimension
+        self.handcrafted_proj = nn.Linear(handcrafted_dim, output_dim)
+        self.deep_proj = nn.Linear(deep_dim, output_dim)
+        
+        # Attention mechanism
+        self.attention = nn.Sequential(
+            nn.Linear(output_dim * 2, output_dim),
+            nn.Tanh(),
+            nn.Linear(output_dim, 2),  # 2 weights: handcrafted vs deep
+            nn.Softmax(dim=1)
+        )
+        
+        # Final projection
+        self.output_proj = nn.Sequential(
+            nn.LayerNorm(output_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
+    
+    def forward(self, handcrafted_feats, deep_feats):
+        """
+        Args:
+            handcrafted_feats: (B, handcrafted_dim)
+            deep_feats: (B, deep_dim)
+        
+        Returns:
+            fused_feats: (B, output_dim)
+        """
+        # Project to same dimension
+        h_proj = self.handcrafted_proj(handcrafted_feats)  # (B, output_dim)
+        d_proj = self.deep_proj(deep_feats)  # (B, output_dim)
+        
+        # Compute attention weights
+        combined = torch.cat([h_proj, d_proj], dim=1)  # (B, output_dim*2)
+        weights = self.attention(combined)  # (B, 2)
+        
+        # Weighted fusion
+        w_h = weights[:, 0].unsqueeze(1)  # (B, 1)
+        w_d = weights[:, 1].unsqueeze(1)  # (B, 1)
+        
+        fused = w_h * h_proj + w_d * d_proj  # (B, output_dim)
+        
+        return self.output_proj(fused)
+
+
+class HybridFeatureExtractor(nn.Module):
+    """
+    Hybrid feature extractor combining handcrafted and deep learning features.
+    
+    Pipeline:
+    1. Extract handcrafted features from processed signal (26 features × 4 channels)
+    2. Extract deep features from raw signal (CNN or Transformer)
+    3. Fuse both feature types (concatenation or attention-based)
+    
+    Args:
+        deep_extractor: CNN or Transformer feature extractor
+        fusion_mode: 'concat' or 'attention'
+        handcrafted_dim: Dimension of handcrafted features (default: 104 = 26×4)
+        deep_dim: Dimension of deep features (default: 128)
+        output_dim: Output dimension after fusion
+        dropout: Dropout rate
+    """
+    
+    def __init__(self, deep_extractor, fusion_mode='concat', 
+                 handcrafted_dim=104, deep_dim=128, output_dim=256, dropout=0.3):
+        super().__init__()
+        self.deep_extractor = deep_extractor
+        self.fusion_mode = fusion_mode
+        
+        # Fusion layer
+        if fusion_mode == 'concat':
+            self.fusion = ConcatFusion(handcrafted_dim, deep_dim, output_dim, dropout)
+        elif fusion_mode == 'attention':
+            self.fusion = AttentionFusion(handcrafted_dim, deep_dim, output_dim, dropout)
+        else:
+            raise ValueError(f"Unknown fusion_mode: {fusion_mode}")
+    
+    def forward(self, raw_eeg, handcrafted_feats):
+        """
+        Args:
+            raw_eeg: (B, T, C) - Raw EEG signals
+            handcrafted_feats: (B, C, 26) - Handcrafted features
+        
+        Returns:
+            fused_features: (B, output_dim) - Fused features
+        """
+        # Extract deep features from raw EEG
+        deep_feats = self.deep_extractor(raw_eeg)  # (B, deep_dim)
+        
+        # Flatten handcrafted features
+        B, C, F = handcrafted_feats.shape
+        handcrafted_flat = handcrafted_feats.reshape(B, C * F)  # (B, 104)
+        
+        # Fuse features
+        fused = self.fusion(handcrafted_flat, deep_feats)  # (B, output_dim)
+        
+        return fused
+
+
+# ==================================================
 # UNIFIED FEATURE EXTRACTOR WRAPPER
 # ==================================================
 
@@ -297,21 +431,23 @@ def create_feature_extractor(config):
     
     Returns:
         feature_extractor: Feature extraction module or None for handcrafted
+        is_hybrid: Boolean indicating if hybrid mode is used
     """
     if config.FEATURE_EXTRACTION_MODE == 'handcrafted':
-        return None  # Use handcrafted features in data loader
+        return None, False  # Use handcrafted features in data loader
     
     elif config.FEATURE_EXTRACTION_MODE == 'deep_cnn':
-        return CNNFeatureExtractor(
+        extractor = CNNFeatureExtractor(
             n_channels=config.EEG_CHANNELS,
             filters=config.CNN_FILTERS,
             kernel_size=config.CNN_KERNEL_SIZE,
             feature_dim=config.DEEP_FEATURE_DIM,
             dropout=0.3
         )
+        return extractor, False
     
     elif config.FEATURE_EXTRACTION_MODE == 'deep_transformer':
-        return TransformerFeatureExtractor(
+        extractor = TransformerFeatureExtractor(
             n_channels=config.EEG_CHANNELS,
             d_model=config.DEEP_FEATURE_DIM,
             nhead=config.TRANSFORMER_HEADS,
@@ -319,9 +455,51 @@ def create_feature_extractor(config):
             feature_dim=config.DEEP_FEATURE_DIM,
             dropout=0.3
         )
+        return extractor, False
+    
+    elif config.FEATURE_EXTRACTION_MODE == 'hybrid_cnn':
+        # Create CNN extractor
+        cnn_extractor = CNNFeatureExtractor(
+            n_channels=config.EEG_CHANNELS,
+            filters=config.CNN_FILTERS,
+            kernel_size=config.CNN_KERNEL_SIZE,
+            feature_dim=config.DEEP_FEATURE_DIM,
+            dropout=0.3
+        )
+        # Wrap in hybrid extractor
+        hybrid = HybridFeatureExtractor(
+            deep_extractor=cnn_extractor,
+            fusion_mode=config.HYBRID_FUSION_MODE,
+            handcrafted_dim=config.EEG_CHANNELS * config.EEG_FEATURES,  # 4 × 26 = 104
+            deep_dim=config.DEEP_FEATURE_DIM,
+            output_dim=config.DEEP_FEATURE_DIM * 2,  # 256 for richer representation
+            dropout=0.3
+        )
+        return hybrid, True
+    
+    elif config.FEATURE_EXTRACTION_MODE == 'hybrid_transformer':
+        # Create Transformer extractor
+        transformer_extractor = TransformerFeatureExtractor(
+            n_channels=config.EEG_CHANNELS,
+            d_model=config.DEEP_FEATURE_DIM,
+            nhead=config.TRANSFORMER_HEADS,
+            num_layers=config.TRANSFORMER_LAYERS,
+            feature_dim=config.DEEP_FEATURE_DIM,
+            dropout=0.3
+        )
+        # Wrap in hybrid extractor
+        hybrid = HybridFeatureExtractor(
+            deep_extractor=transformer_extractor,
+            fusion_mode=config.HYBRID_FUSION_MODE,
+            handcrafted_dim=config.EEG_CHANNELS * config.EEG_FEATURES,  # 4 × 26 = 104
+            deep_dim=config.DEEP_FEATURE_DIM,
+            output_dim=config.DEEP_FEATURE_DIM * 2,  # 256 for richer representation
+            dropout=0.3
+        )
+        return hybrid, True
     
     else:
         raise ValueError(
             f"Unknown FEATURE_EXTRACTION_MODE: {config.FEATURE_EXTRACTION_MODE}. "
-            f"Must be 'handcrafted', 'deep_cnn', or 'deep_transformer'."
+            f"Must be 'handcrafted', 'deep_cnn', 'deep_transformer', 'hybrid_cnn', or 'hybrid_transformer'."
         )

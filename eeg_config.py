@@ -75,7 +75,7 @@ class Config:
     EEG_CHANNELS = 4  # TP9, AF7, AF8, TP10
     EEG_FEATURES = 26
     EEG_WINDOW_SEC = 10.0
-    EEG_OVERLAP = 0 if CLIP_INDEPENDENT else 0.0
+    EEG_OVERLAP = 0.5 if CLIP_INDEPENDENT else 0.0
     EEG_BATCH_SIZE = 32 if CLIP_INDEPENDENT else 64
     EEG_EPOCHS = 200 if CLIP_INDEPENDENT else 150
     EEG_LR = 5e-4 if CLIP_INDEPENDENT else 1e-3
@@ -86,7 +86,9 @@ class Config:
     # 'handcrafted': Use 26 handcrafted features (DE, PSD, etc.)
     # 'deep_cnn': Use CNN to learn features from raw EEG
     # 'deep_transformer': Use Transformer to learn features from raw EEG
-    FEATURE_EXTRACTION_MODE = 'handcrafted'  # Options: 'handcrafted', 'deep_cnn', 'deep_transformer'
+    # 'hybrid_cnn': Combine handcrafted + CNN features
+    # 'hybrid_transformer': Combine handcrafted + Transformer features
+    FEATURE_EXTRACTION_MODE = 'hybrid_cnn'  # Options: 'handcrafted', 'deep_cnn', 'deep_transformer', 'hybrid_cnn', 'hybrid_transformer'
     
     # Deep learning feature extractor parameters
     DEEP_FEATURE_DIM = 128  # Output dimension of deep feature extractor
@@ -94,6 +96,9 @@ class Config:
     CNN_KERNEL_SIZE = 7  # Kernel size for temporal convolutions
     TRANSFORMER_HEADS = 4  # Number of attention heads
     TRANSFORMER_LAYERS = 2  # Number of transformer encoder layers
+    
+    # Hybrid feature fusion
+    HYBRID_FUSION_MODE = 'concat'  # Options: 'concat' (concatenate), 'attention' (learned weighting)
     
     # Augmentation settings
     USE_MIXUP = True  # Set to True to enable Mixup data augmentation
