@@ -308,6 +308,122 @@ def create_group_splits(y_labels, subjects, clip_ids, config, val_ratio=0.15, te
     return split_indices
 
 
+def create_group_splits_clip_independent(y_labels, subjects, clip_ids, config, val_ratio=0.15, test_ratio=0.15):
+    """
+    Create train/val/test splits using all subjects in group (by CLIPS).
+    
+    CLIP-INDEPENDENT: Ensures entire clips stay together in one split.
+    No data leakage - if a recording is in test, ALL its windows are in test.
+    
+    Args:
+        y_labels: (N,) emotion labels
+        subjects: (N,) subject IDs
+        clip_ids: (N,) recording IDs
+        config: Configuration object
+        val_ratio: Validation set ratio
+        test_ratio: Test set ratio
+    
+    Returns:
+        split_indices: Dict with 'train', 'val', 'test' indices
+    """
+    print("\n" + "="*80)
+    print("CREATING GROUP SPLIT (CLIP-INDEPENDENT, NO DATA LEAKAGE)")
+    print("="*80)
+    
+    from collections import defaultdict
+    
+    # Get unique clips and their label distributions
+    unique_clips = np.unique(clip_ids)
+    n_clips = len(unique_clips)
+    
+    print(f"   Total unique clips: {n_clips}")
+    
+    # For each clip, determine its dominant label and collect all window indices
+    clip_info = {}  # clip_id -> {'label': dominant_label, 'indices': [window_indices]}
+    
+    for clip_id in unique_clips:
+        clip_mask = (clip_ids == clip_id)
+        clip_indices = np.where(clip_mask)[0]
+        clip_labels = y_labels[clip_mask]
+        
+        # Dominant label (most common emotion in this clip)
+        dominant_label = np.bincount(clip_labels).argmax()
+        
+        clip_info[clip_id] = {
+            'label': dominant_label,
+            'indices': clip_indices,
+            'n_windows': len(clip_indices)
+        }
+    
+    # Group clips by their dominant label
+    clips_by_class = defaultdict(list)
+    for clip_id, info in clip_info.items():
+        clips_by_class[info['label']].append(clip_id)
+    
+    # Split clips by class (stratified)
+    train_clips, val_clips, test_clips = [], [], []
+    
+    for class_id in range(config.NUM_CLASSES):
+        class_clip_list = clips_by_class[class_id]
+        n_class_clips = len(class_clip_list)
+        
+        if n_class_clips == 0:
+            print(f"   ⚠️  No clips for class {class_id}")
+            continue
+        
+        # Shuffle clips for random split
+        np.random.shuffle(class_clip_list)
+        
+        # Calculate split points
+        n_test = max(1, int(n_class_clips * test_ratio))
+        n_val = max(1, int(n_class_clips * val_ratio))
+        
+        test_clips.extend(class_clip_list[:n_test])
+        val_clips.extend(class_clip_list[n_test:n_test+n_val])
+        train_clips.extend(class_clip_list[n_test+n_val:])
+        
+        print(f"   Class {class_id}: {n_class_clips} clips → Train:{len(class_clip_list[n_test+n_val:])}, Val:{n_val}, Test:{n_test}")
+    
+    # Convert clip assignments to window indices
+    def clips_to_indices(clip_list):
+        indices = []
+        for clip_id in clip_list:
+            indices.extend(clip_info[clip_id]['indices'])
+        return np.array(indices, dtype=int)
+    
+    split_indices = {
+        'train': clips_to_indices(train_clips),
+        'val': clips_to_indices(val_clips),
+        'test': clips_to_indices(test_clips)
+    }
+    
+    print(f"\n📊 Distribution:")
+    print(f"   Train: {len(train_clips)} clips, {len(split_indices['train'])} windows")
+    print(f"   Val:   {len(val_clips)} clips, {len(split_indices['val'])} windows")
+    print(f"   Test:  {len(test_clips)} clips, {len(split_indices['test'])} windows")
+    
+    # Verify no clip overlap
+    train_clips_set = set(train_clips)
+    val_clips_set = set(val_clips)
+    test_clips_set = set(test_clips)
+    
+    assert len(train_clips_set & val_clips_set) == 0, "Train/Val clip overlap!"
+    assert len(train_clips_set & test_clips_set) == 0, "Train/Test clip overlap!"
+    assert len(val_clips_set & test_clips_set) == 0, "Val/Test clip overlap!"
+    
+    print(f"\n✅ Verified: No clip overlap between splits (clip-independent)")
+    
+    # Show class distribution per split
+    for split_name, indices in split_indices.items():
+        if len(indices) == 0:
+            continue
+        labels_split = y_labels[indices]
+        dist = np.bincount(labels_split, minlength=config.NUM_CLASSES)
+        print(f"   {split_name.capitalize()} class dist: {dist}")
+    
+    return split_indices
+
+
 # ==================================================
 # TRAINING FUNCTION
 # ==================================================
@@ -528,6 +644,8 @@ def main():
     parser.add_argument('--mode', type=str, default='loso',
                        choices=['loso', 'group'],
                        help='Training mode: loso (leave-one-subject-out) or group (all subjects)')
+    parser.add_argument('--clip_independent', action='store_true',
+                       help='Use clip-independent splits (no data leakage). Only for group mode.')
     parser.add_argument('--test_subject', type=int, default=None,
                        help='Subject to hold out for testing (only for loso mode)')
     parser.add_argument('--save_model', type=str, default=None,
@@ -550,6 +668,8 @@ def main():
     print("="*80)
     print(f"Subject group: {args.subjects}")
     print(f"Mode: {args.mode}")
+    if args.mode == 'group':
+        print(f"Split type: {'Clip-Independent' if args.clip_independent else 'Window-Based'}")
     print(f"Device: {config.DEVICE}")
     print("="*80)
     
@@ -599,7 +719,13 @@ def main():
         
     else:
         # Group mode: train on all subjects
-        split_indices = create_group_splits(y_labels, subjects, clip_ids, config)
+        if args.clip_independent:
+            # Clip-independent splits (no data leakage)
+            split_indices = create_group_splits_clip_independent(y_labels, subjects, clip_ids, config)
+            group_name += "_clip_independent"
+        else:
+            # Window-based splits (original method)
+            split_indices = create_group_splits(y_labels, subjects, clip_ids, config)
         
         model, history, (test_acc, test_f1) = train_group_model(
             X_features, y_labels, split_indices, label_to_id, config, group_name
@@ -611,6 +737,7 @@ def main():
                 'model_state_dict': model.state_dict(),
                 'config': config,
                 'subject_group': args.subjects,
+                'clip_independent': args.clip_independent if args.mode == 'group' else None,
                 'test_acc': test_acc,
                 'test_f1': test_f1,
                 'label_to_id': label_to_id
