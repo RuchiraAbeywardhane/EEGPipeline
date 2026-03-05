@@ -27,7 +27,7 @@ class Config:
     
     # Data split mode
     SUBJECT_INDEPENDENT = False
-    CLIP_INDEPENDENT = True  # ⚠️ MUST ALWAYS BE TRUE to prevent data leakage!
+    CLIP_INDEPENDENT = False  # ⚠️ MUST ALWAYS BE TRUE to prevent data leakage!
     
     # Domain Adaptation Mode (only used when training with domain adaptation)
     # 'A': No adaptation (baseline)
@@ -82,7 +82,7 @@ class Config:
     EEG_CHANNELS = 4  # TP9, AF7, AF8, TP10
     EEG_FEATURES = 26
     EEG_WINDOW_SEC = 10.0
-    EEG_OVERLAP = 0.5 if CLIP_INDEPENDENT else 0.0
+    EEG_OVERLAP = 0 if CLIP_INDEPENDENT else 0.0
     EEG_BATCH_SIZE = 32 if CLIP_INDEPENDENT else 64
     EEG_EPOCHS = 200 if CLIP_INDEPENDENT else 150
     EEG_LR = 5e-4 if CLIP_INDEPENDENT else 1e-3
