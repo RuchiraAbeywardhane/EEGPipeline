@@ -71,7 +71,7 @@ class GroupSpecificModel(nn.Module):
     def _init_weights(self):
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                nn.init.truncated_normal_(m.weight, std=0.1)
+                nn.init.trunc_normal_(m.weight, std=0.1)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0.1)
     
