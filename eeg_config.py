@@ -75,11 +75,11 @@ class Config:
     EEG_CHANNELS = 4  # TP9, AF7, AF8, TP10
     EEG_FEATURES = 26
     EEG_WINDOW_SEC = 10.0
-    EEG_OVERLAP = 0.5 if CLIP_INDEPENDENT else 0.0
-    EEG_BATCH_SIZE = 32 if CLIP_INDEPENDENT else 64
-    EEG_EPOCHS = 200 if CLIP_INDEPENDENT else 150
-    EEG_LR = 5e-4 if CLIP_INDEPENDENT else 1e-3
-    EEG_PATIENCE = 30 if CLIP_INDEPENDENT else 20
+    EEG_OVERLAP = 0.75  # Increase overlap to get more samples
+    EEG_BATCH_SIZE = 16  # Smaller batch for small dataset
+    EEG_EPOCHS = 300  # More epochs for small dataset
+    EEG_LR = 1e-3  # Higher learning rate
+    EEG_PATIENCE = 50  # More patience
     EEG_CHECKPOINT = "best_eeg_model.pt"
     
     # Feature Extraction Mode
@@ -88,7 +88,7 @@ class Config:
     # 'deep_transformer': Use Transformer to learn features from raw EEG
     # 'hybrid_cnn': Combine handcrafted + CNN features
     # 'hybrid_transformer': Combine handcrafted + Transformer features
-    FEATURE_EXTRACTION_MODE = 'hybrid_cnn'  # Options: 'handcrafted', 'deep_cnn', 'deep_transformer', 'hybrid_cnn', 'hybrid_transformer'
+    FEATURE_EXTRACTION_MODE = 'handcrafted'  # Start with handcrafted baseline
     
     # Deep learning feature extractor parameters
     DEEP_FEATURE_DIM = 128  # Output dimension of deep feature extractor
@@ -101,9 +101,9 @@ class Config:
     HYBRID_FUSION_MODE = 'concat'  # Options: 'concat' (concatenate), 'attention' (learned weighting)
     
     # Augmentation settings
-    USE_MIXUP = True  # Set to True to enable Mixup data augmentation
-    MIXUP_ALPHA = 0.2  # Mixup interpolation strength (only used if USE_MIXUP=True)
-    LABEL_SMOOTHING = 0.1 if CLIP_INDEPENDENT else 0.0
+    USE_MIXUP = True  # ENABLE mixup for data augmentation
+    MIXUP_ALPHA = 0.4  # Stronger mixup for small dataset
+    LABEL_SMOOTHING = 0.1
     
     # Frequency bands for feature extraction
     BANDS = [("delta", (1, 3)), ("theta", (4, 7)), ("alpha", (8, 13)), 
