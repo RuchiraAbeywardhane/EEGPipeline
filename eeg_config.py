@@ -93,7 +93,7 @@ class Config:
     # 'handcrafted': Use 26 handcrafted features (DE, PSD, etc.)
     # 'deep_cnn': Use CNN to learn features from raw EEG
     # 'deep_transformer': Use Transformer to learn features from raw EEG
-    FEATURE_EXTRACTION_MODE = 'deep_cnn'  # Options: 'handcrafted', 'deep_cnn', 'deep_transformer'
+    FEATURE_EXTRACTION_MODE = 'handcrafted'  # Options: 'handcrafted', 'deep_cnn', 'deep_transformer'
     
     # Deep learning feature extractor parameters
     DEEP_FEATURE_DIM = 128  # Output dimension of deep feature extractor
