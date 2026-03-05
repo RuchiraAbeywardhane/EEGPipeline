@@ -34,7 +34,7 @@ from eeg_bilstm_model import SimpleBiLSTMClassifier
 from eeg_data_loader import (
     load_eeg_data,
     extract_eeg_features,
-    create_data_splits
+    create_data_splits_and_window  # New function: split recordings first, then window
 )
 
 # # # Import data loading functions from separate module
@@ -71,32 +71,26 @@ def main():
     print("=" * 80)
     print(f"Dataset: {config.DATA_ROOT}")
     print(f"Mode: {'Subject-Independent' if config.SUBJECT_INDEPENDENT else 'Subject-Dependent'}")
+    print(f"Clip-Independent: {config.CLIP_INDEPENDENT}")
     print(f"Baseline Reduction: {config.USE_BASELINE_REDUCTION}")
     print("=" * 80)
     
     # # Check the JSON structure before loading data
     # check_json_structure(config.DATA_ROOT, num_samples=3)
 
-    # Step 1: Load EEG data
-    eeg_X_raw, eeg_y, eeg_subjects, eeg_label_map = load_eeg_data(config.DATA_ROOT, config)
+    # Step 1: Load EEG recordings (not windowed yet)
+    recordings, label_to_id = load_eeg_data(config.DATA_ROOT, config)
     
-    # Step 2: Extract features
+    # Step 2: Split recordings first, then apply windowing (prevents clip leakage)
+    eeg_X_raw, eeg_y, eeg_subjects, split_indices = create_data_splits_and_window(
+        recordings, label_to_id, config
+    )
+    
+    # Step 3: Extract features
     eeg_X_features = extract_eeg_features(eeg_X_raw, config)
     
-    # Step 3: Create data splits
-    print("\n" + "="*80)
-    print("CREATING DATA SPLIT")
-    print("="*80)
-    
-    split_indices = create_data_splits(eeg_y, eeg_subjects, config)
-    
-    print(f"\n📋 Split Summary:")
-    print(f"   Train samples: {len(split_indices['train'])}")
-    print(f"   Val samples: {len(split_indices['val'])}")
-    print(f"   Test samples: {len(split_indices['test'])}")
-    
     # Step 4: Train EEG model
-    eeg_model, eeg_mu, eeg_sd = train_eeg_model(eeg_X_features, eeg_y, split_indices, eeg_label_map, config)
+    eeg_model, eeg_mu, eeg_sd = train_eeg_model(eeg_X_features, eeg_y, split_indices, label_to_id, config)
     
     print("\n" + "=" * 80)
     print("🎉 EEG PIPELINE COMPLETE! 🎉")

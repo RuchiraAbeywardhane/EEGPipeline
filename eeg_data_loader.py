@@ -178,16 +178,15 @@ def load_baseline_files(files, data_root):
 
 def load_eeg_data(data_root, config):
     """
-    Load EEG data from MUSE files with optional baseline reduction.
+    Load EEG recordings from MUSE files with optional baseline reduction.
+    Returns full recordings (not windowed yet) to enable proper clip-independent splitting.
     
     Args:
         data_root: Root directory containing MUSE JSON files
-        config: Configuration object with parameters (window size, overlap, etc.)
+        config: Configuration object with parameters
     
     Returns:
-        X_raw: (N, T, C) - Raw EEG windows
-        y_labels: (N,) - Class labels as integers
-        subject_ids: (N,) - Subject IDs for each window
+        recordings: List of recording dictionaries with 'signal', 'label', 'subject', 'emotion', 'filepath'
         label_to_id: Dictionary mapping label names to integers
     """
     print("\n" + "="*80)
@@ -222,10 +221,8 @@ def load_eeg_data(data_root, config):
     else:
         print(f"\n🔧 Baseline Reduction: DISABLED")
     
-    # Prepare windowing parameters
-    all_windows, all_labels, all_subjects = [], [], []
-    win_samples = int(config.EEG_WINDOW_SEC * config.EEG_FS)
-    step_samples = int(win_samples * (1.0 - config.EEG_OVERLAP))
+    # Store recordings without windowing
+    all_recordings = []
     
     # Track statistics
     reduced_count = 0
@@ -237,6 +234,9 @@ def load_eeg_data(data_root, config):
         'insufficient_length': 0,
         'parse_error': 0
     }
+    
+    # Minimum samples needed (will be used later during windowing)
+    min_samples = int(config.EEG_WINDOW_SEC * config.EEG_FS)
     
     # Process each file
     for fpath in files:
@@ -296,7 +296,7 @@ def load_eeg_data(data_root, config):
             
             tp9, af7, af8, tp10 = tp9[:L][mask], af7[:L][mask], af8[:L][mask], tp10[:L][mask]
             L = len(tp9)
-            if L < win_samples:
+            if L < min_samples:
                 skipped_reasons['insufficient_length'] += 1
                 continue
             
@@ -315,19 +315,20 @@ def load_eeg_data(data_root, config):
                 
                 # Apply InvBase method
                 signal = apply_baseline_reduction(signal_trim, baseline_trim)
-                L = len(signal)
                 
                 reduced_count += 1
             else:
                 not_reduced_count += 1
             
-            # Create windows with overlap
-            for start in range(0, L - win_samples + 1, step_samples):
-                window = signal[start:start + win_samples]
-                if len(window) == win_samples:
-                    all_windows.append(window)
-                    all_labels.append(superclass)
-                    all_subjects.append(subject)
+            # Store the full recording (not windowed yet)
+            recording_data = {
+                'signal': signal.astype(np.float32),
+                'label': superclass,
+                'subject': subject,
+                'emotion': emotion,
+                'filepath': fpath
+            }
+            all_recordings.append(recording_data)
         
         except Exception as e:
             skipped_reasons['parse_error'] += 1
@@ -336,25 +337,24 @@ def load_eeg_data(data_root, config):
     # Print statistics
     print(f"\n📊 File Processing Summary:")
     print(f"   Total files found: {len(files)}")
-    print(f"   Successfully processed: {len(all_windows)} windows")
+    print(f"   Successfully processed: {len(all_recordings)} recordings")
     print(f"\n   Skipped files:")
     for reason, count in skipped_reasons.items():
         if count > 0:
             print(f"      {reason}: {count}")
     
-    if len(all_windows) == 0:
-        print("\n❌ ERROR: No valid EEG windows extracted!")
+    if len(all_recordings) == 0:
+        print("\n❌ ERROR: No valid EEG recordings loaded!")
         raise ValueError("No valid EEG data extracted.")
     
-    # Convert to arrays
-    X_raw = np.stack(all_windows).astype(np.float32)
-    unique_labels = sorted(list(set(all_labels)))
+    # Create label mapping
+    unique_labels = sorted(list(set(rec['label'] for rec in all_recordings)))
     label_to_id = {lab: i for i, lab in enumerate(unique_labels)}
-    y_labels = np.array([label_to_id[lab] for lab in all_labels], dtype=np.int64)
-    subject_ids = np.array(all_subjects)
     
-    print(f"\n✅ EEG data loaded: {X_raw.shape}")
-    print(f"   Label distribution: {Counter(all_labels)}")
+    # Print label distribution
+    label_counts = Counter(rec['label'] for rec in all_recordings)
+    print(f"\n✅ Loaded {len(all_recordings)} recordings")
+    print(f"   Label distribution: {dict(label_counts)}")
     
     if config.USE_BASELINE_REDUCTION:
         total_files = reduced_count + not_reduced_count
@@ -364,23 +364,201 @@ def load_eeg_data(data_root, config):
         if total_files > 0:
             print(f"   📈 Reduction rate: {100*reduced_count/total_files:.1f}%")
     
-    return X_raw, y_labels, subject_ids, label_to_id
+    return all_recordings, label_to_id
 
 
 # ==================================================
-# FEATURE EXTRACTION
+# DATA SPLITTING AND WINDOWING
 # ==================================================
 
-# Feature extraction moved to eeg_feature_extractor.py
+def create_data_splits_and_window(recordings, label_to_id, config, train_ratio=0.70, val_ratio=0.15, test_ratio=0.15):
+    """
+    Split recordings first, then apply windowing to prevent clip leakage.
+    This ensures that when CLIP_INDEPENDENT=True, all windows from the same recording
+    stay in the same split (train/val/test).
+    
+    Args:
+        recordings: List of recording dictionaries from load_eeg_data
+        label_to_id: Dictionary mapping label names to integers
+        config: Configuration object
+        train_ratio: Proportion for training set
+        val_ratio: Proportion for validation set
+        test_ratio: Proportion for test set
+    
+    Returns:
+        X_raw: Windowed data (N, T, C)
+        y_labels: Label array (N,)
+        subject_ids: Subject ID array (N,)
+        split_indices: Dictionary with 'train', 'val', 'test' index arrays
+    """
+    print("\n" + "="*80)
+    print("SPLITTING AND WINDOWING DATA")
+    print("="*80)
+    
+    n_recordings = len(recordings)
+    
+    # Extract metadata from recordings
+    recording_subjects = np.array([r['subject'] for r in recordings])
+    recording_labels = np.array([r['label'] for r in recordings])
+    
+    # STEP 1: Split recordings (NOT windows)
+    if config.SUBJECT_INDEPENDENT:
+        print("  Strategy: SUBJECT-INDEPENDENT split")
+        print("  (All windows from same subject stay in same split)")
+        
+        unique_subjects = np.unique(recording_subjects)
+        np.random.shuffle(unique_subjects)
+        
+        n_test = int(len(unique_subjects) * test_ratio)
+        n_val = int(len(unique_subjects) * val_ratio)
+        
+        test_subjects = unique_subjects[:n_test]
+        val_subjects = unique_subjects[n_test:n_test+n_val]
+        train_subjects = unique_subjects[n_test+n_val:]
+        
+        train_rec_mask = np.isin(recording_subjects, train_subjects)
+        val_rec_mask = np.isin(recording_subjects, val_subjects)
+        test_rec_mask = np.isin(recording_subjects, test_subjects)
+        
+        print(f"  Train subjects: {len(train_subjects)}")
+        print(f"  Val subjects: {len(val_subjects)}")
+        print(f"  Test subjects: {len(test_subjects)}")
+        
+    elif config.CLIP_INDEPENDENT:
+        print("  Strategy: CLIP-INDEPENDENT split")
+        print("  (Split recordings first, then window - NO CLIP LEAKAGE)")
+        
+        indices = np.arange(n_recordings)
+        np.random.shuffle(indices)
+        
+        n_test = int(n_recordings * test_ratio)
+        n_val = int(n_recordings * val_ratio)
+        
+        train_rec_mask = np.zeros(n_recordings, dtype=bool)
+        val_rec_mask = np.zeros(n_recordings, dtype=bool)
+        test_rec_mask = np.zeros(n_recordings, dtype=bool)
+        
+        test_rec_mask[indices[:n_test]] = True
+        val_rec_mask[indices[n_test:n_test+n_val]] = True
+        train_rec_mask[indices[n_test+n_val:]] = True
+        
+        print(f"  Train recordings: {np.sum(train_rec_mask)}")
+        print(f"  Val recordings: {np.sum(val_rec_mask)}")
+        print(f"  Test recordings: {np.sum(test_rec_mask)}")
+    else:
+        # Subject-dependent WITHOUT clip independence
+        # We'll window ALL recordings first, then split randomly
+        print("  Strategy: RANDOM WINDOW split")
+        print("  (Window first, then split - overlapping windows may leak)")
+        train_rec_mask = val_rec_mask = test_rec_mask = None
+    
+    # STEP 2: Apply windowing to each split separately
+    win_samples = int(config.EEG_WINDOW_SEC * config.EEG_FS)
+    step_samples = int(win_samples * (1.0 - config.EEG_OVERLAP))
+    
+    print(f"\n  Windowing parameters:")
+    print(f"     Window size: {config.EEG_WINDOW_SEC}s ({win_samples} samples)")
+    print(f"     Overlap: {config.EEG_OVERLAP*100:.0f}%")
+    print(f"     Step size: {step_samples} samples")
+    
+    all_windows = []
+    all_labels = []
+    all_subjects = []
+    window_split_ids = []  # Track which split each window belongs to
+    
+    split_map = {'train': 0, 'val': 1, 'test': 2}
+    
+    if train_rec_mask is not None:  # CLIP_INDEPENDENT or SUBJECT_INDEPENDENT
+        for split_name, rec_mask in [('train', train_rec_mask), 
+                                      ('val', val_rec_mask), 
+                                      ('test', test_rec_mask)]:
+            split_recordings = [recordings[i] for i in range(n_recordings) if rec_mask[i]]
+            
+            split_window_count = 0
+            for rec in split_recordings:
+                signal = rec['signal']
+                L = len(signal)
+                
+                # Window this recording
+                for start in range(0, L - win_samples + 1, step_samples):
+                    window = signal[start:start + win_samples]
+                    if len(window) == win_samples:
+                        all_windows.append(window)
+                        all_labels.append(label_to_id[rec['label']])
+                        all_subjects.append(rec['subject'])
+                        window_split_ids.append(split_map[split_name])
+                        split_window_count += 1
+            
+            print(f"  {split_name.capitalize()}: {len([r for i, r in enumerate(recordings) if rec_mask[i]])} recordings → {split_window_count} windows")
+        
+        # Create split indices based on pre-assigned splits
+        window_split_ids = np.array(window_split_ids)
+        split_indices = {
+            'train': np.where(window_split_ids == 0)[0],
+            'val': np.where(window_split_ids == 1)[0],
+            'test': np.where(window_split_ids == 2)[0]
+        }
+        
+    else:  # Subject-dependent WITHOUT clip independence
+        # Window ALL recordings first
+        print(f"  Windowing all {n_recordings} recordings...")
+        for rec in recordings:
+            signal = rec['signal']
+            L = len(signal)
+            
+            for start in range(0, L - win_samples + 1, step_samples):
+                window = signal[start:start + win_samples]
+                if len(window) == win_samples:
+                    all_windows.append(window)
+                    all_labels.append(label_to_id[rec['label']])
+                    all_subjects.append(rec['subject'])
+        
+        # Then split windows randomly
+        n_windows = len(all_windows)
+        indices = np.arange(n_windows)
+        np.random.shuffle(indices)
+        
+        n_test = int(n_windows * test_ratio)
+        n_val = int(n_windows * val_ratio)
+        
+        split_indices = {
+            'test': indices[:n_test],
+            'val': indices[n_test:n_test+n_val],
+            'train': indices[n_test+n_val:]
+        }
+        
+        print(f"  Total windows: {n_windows}")
+    
+    # Convert to arrays
+    X_raw = np.stack(all_windows).astype(np.float32)
+    y_labels = np.array(all_labels, dtype=np.int64)
+    subject_ids = np.array(all_subjects)
+    
+    print(f"\n✅ Windowed data shape: {X_raw.shape}")
+    print(f"\n📋 Split Summary:")
+    print(f"   Train windows: {len(split_indices['train'])}")
+    print(f"   Val windows: {len(split_indices['val'])}")
+    print(f"   Test windows: {len(split_indices['test'])}")
+    
+    # Print class distribution for each split
+    for split_name, indices in split_indices.items():
+        labels_split = y_labels[indices]
+        dist = Counter(labels_split)
+        print(f"   {split_name.capitalize()} class distribution: {dict(dist)}")
+    
+    return X_raw, y_labels, subject_ids, split_indices
 
 
 # ==================================================
-# DATA SPLITTING
+# DATA SPLITTING (Legacy - kept for backward compatibility)
 # ==================================================
 
 def create_data_splits(y_labels, subject_ids, config, train_ratio=0.70, val_ratio=0.15, test_ratio=0.15):
     """
-    Create train/val/test splits with subject-independent or random strategy.
+    Legacy function: Create train/val/test splits with subject-independent or random strategy.
+    
+    WARNING: This function is called AFTER windowing, which can cause data leakage when
+    CLIP_INDEPENDENT=True. Use create_data_splits_and_window() instead for proper splitting.
     
     Args:
         y_labels: Array of class labels
@@ -394,7 +572,7 @@ def create_data_splits(y_labels, subject_ids, config, train_ratio=0.70, val_rati
         split_indices: Dictionary with 'train', 'val', 'test' index arrays
     """
     print("\n" + "="*80)
-    print("CREATING DATA SPLIT")
+    print("CREATING DATA SPLIT (LEGACY)")
     print("="*80)
     
     n_samples = len(y_labels)
