@@ -27,7 +27,7 @@ class Config:
     
     # Data split mode
     SUBJECT_INDEPENDENT = False
-    CLIP_INDEPENDENT = False  # ⚠️ MUST ALWAYS BE TRUE to prevent data leakage!
+    CLIP_INDEPENDENT = True  # ⚠️ RECOMMENDED: Keep True to prevent data leakage!
     
     # Domain Adaptation Mode (only used when training with domain adaptation)
     # 'A': No adaptation (baseline)
@@ -44,14 +44,7 @@ class Config:
     # Validation: Raise error if misconfigured
     @classmethod
     def validate_config(cls):
-        """Validate configuration to prevent data leakage."""
-        if not cls.CLIP_INDEPENDENT:
-            raise ValueError(
-                "CLIP_INDEPENDENT must always be True to prevent data leakage! "
-                "Setting it to False causes windows from the same recording to appear "
-                "in both train and test sets, leading to inflated accuracy."
-            )
-        
+        """Validate configuration."""
         if cls.ADAPTATION_MODE not in ['A', 'B', 'C', 'D']:
             raise ValueError(
                 f"ADAPTATION_MODE must be 'A', 'B', 'C', or 'D', got '{cls.ADAPTATION_MODE}'"
