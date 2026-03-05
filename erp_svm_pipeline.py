@@ -12,7 +12,16 @@ Recreates the methodology described in the paper:
                        → 4 channels × 7 components = 28 features per window
 3. FEATURE SELECTION - Sequential Forward Selection (SFS) wrapper
 4. CLASSIFICATION    - Linear SVM (C ≈ 0.1), pairwise emotion tasks
-5. EVALUATION        - 10-fold cross-validation: Accuracy, Confusion Matrix, ROC-AUC
+5. EVALUATION        - 10-fold GroupKFold cross-validation (clip-independent):
+                       Accuracy, Confusion Matrix, ROC-AUC
+
+Leakage prevention
+------------------
+  • Clip-independent  : GroupKFold groups by clip_id so all windows from the
+                        same recording always stay in the same fold.
+  • Subject-dependent : Windows from different subjects CAN appear together in
+                        the same fold — the model sees all subjects during
+                        training (within-subject generalisation).
 
 Author: Final Year Project
 Date: 2026
@@ -33,7 +42,7 @@ from sklearn.svm import SVC
 from sklearn.preprocessing import StandardScaler, label_binarize
 from sklearn.pipeline import Pipeline
 from sklearn.model_selection import (
-    StratifiedKFold, cross_val_predict, cross_validate
+    GroupKFold, cross_val_predict, cross_validate
 )
 from sklearn.metrics import (
     accuracy_score, confusion_matrix, ConfusionMatrixDisplay,
@@ -73,9 +82,9 @@ ERP_WINDOWS = [
 CHANNEL_NAMES = ["TP9", "AF7", "AF8", "TP10"]   # MUSE channel order
 
 SVM_C         = 0.1       # Regularisation parameter (paper: C ≈ 0.1)
-CV_FOLDS      = 10        # 10-fold cross-validation
+CV_FOLDS      = 10        # GroupKFold folds (one clip per fold where possible)
 SFS_DIRECTION = "forward" # Sequential Forward Selection
-SFS_CV        = 5         # Inner CV folds for SFS scoring
+SFS_CV        = 5         # Inner CV folds for SFS (also GroupKFold)
 RESULTS_DIR   = "erp_svm_results"
 
 np.random.seed(Config.SEED)
@@ -149,6 +158,7 @@ def extract_erp_features(X_raw: np.ndarray,
 # ──────────────────────────────────────────────────────────────────────────────
 
 def prepare_pairwise(X: np.ndarray, y_str: np.ndarray,
+                     groups: np.ndarray,
                      label_a: str, label_b: str):
     """
     Filter dataset to only the two classes in a pairwise task.
@@ -157,6 +167,7 @@ def prepare_pairwise(X: np.ndarray, y_str: np.ndarray,
     ----------
     X       : (N, F) feature matrix
     y_str   : (N,) string labels (e.g. "Q1", "Q2", ...)
+    groups  : (N,) group labels (e.g. clip_ids)
     label_a : first class string
     label_b : second class string
 
@@ -164,12 +175,14 @@ def prepare_pairwise(X: np.ndarray, y_str: np.ndarray,
     -------
     X_pair  : (M, F)
     y_pair  : (M,)  binary {0, 1}
+    g_pair  : (M,)  group labels
     """
     mask = np.isin(y_str, [label_a, label_b])
     X_pair = X[mask]
     y_raw  = y_str[mask]
     y_pair = (y_raw == label_b).astype(int)   # label_a → 0, label_b → 1
-    return X_pair, y_pair
+    g_pair = groups[mask]
+    return X_pair, y_pair, g_pair
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -177,6 +190,7 @@ def prepare_pairwise(X: np.ndarray, y_str: np.ndarray,
 # ──────────────────────────────────────────────────────────────────────────────
 
 def run_sfs(X: np.ndarray, y: np.ndarray,
+            groups: np.ndarray,
             feat_names: list[str]) -> tuple[np.ndarray, list[str], list[int]]:
     """
     Apply Sequential Forward Selection using a Linear SVM scorer.
@@ -188,6 +202,7 @@ def run_sfs(X: np.ndarray, y: np.ndarray,
     ----------
     X          : (N, F) full feature matrix (already scaled)
     y          : (N,)   binary labels
+    groups     : (N,)   group labels (e.g. clip_ids)
     feat_names : list of F feature name strings
 
     Returns
@@ -206,10 +221,10 @@ def run_sfs(X: np.ndarray, y: np.ndarray,
         tol        = 1e-4,
         direction  = SFS_DIRECTION,
         scoring    = "accuracy",
-        cv         = SFS_CV,
+        cv         = GroupKFold(n_splits=SFS_CV),
         n_jobs     = -1,
     )
-    sfs.fit(X, y)
+    sfs.fit(X, y, groups=groups)
 
     support     = sfs.get_support()
     sel_indices = list(np.where(support)[0])
@@ -228,6 +243,7 @@ def run_sfs(X: np.ndarray, y: np.ndarray,
 # ──────────────────────────────────────────────────────────────────────────────
 
 def run_cross_validation(X: np.ndarray, y: np.ndarray,
+                         groups: np.ndarray,
                          task_name: str) -> dict:
     """
     Train and evaluate a Linear SVM with 10-fold stratified CV.
@@ -238,6 +254,7 @@ def run_cross_validation(X: np.ndarray, y: np.ndarray,
     ----------
     X         : (N, K)  selected & scaled features
     y         : (N,)    binary labels {0, 1}
+    groups    : (N,)    group labels (e.g. clip_ids)
     task_name : string for logging
 
     Returns
@@ -251,12 +268,12 @@ def run_cross_validation(X: np.ndarray, y: np.ndarray,
     svm_clf = SVC(kernel="linear", C=SVM_C,
                   probability=True, random_state=Config.SEED)
 
-    cv = StratifiedKFold(n_splits=CV_FOLDS, shuffle=True,
-                         random_state=Config.SEED)
+    cv = GroupKFold(n_splits=CV_FOLDS)
 
     # Collect per-fold scores
     cv_results = cross_validate(
         svm_clf, X, y,
+        groups=groups,
         cv=cv,
         scoring=["accuracy"],
         return_train_score=False,
@@ -264,8 +281,8 @@ def run_cross_validation(X: np.ndarray, y: np.ndarray,
     )
 
     # Predictions & probabilities across all folds (for confusion matrix / ROC)
-    y_pred = cross_val_predict(svm_clf, X, y, cv=cv, method="predict",  n_jobs=-1)
-    y_prob = cross_val_predict(svm_clf, X, y, cv=cv, method="predict_proba", n_jobs=-1)[:, 1]
+    y_pred = cross_val_predict(svm_clf, X, y, groups=groups, cv=cv, method="predict",  n_jobs=-1)
+    y_prob = cross_val_predict(svm_clf, X, y, groups=groups, cv=cv, method="predict_proba", n_jobs=-1)[:, 1]
 
     acc      = cv_results["test_accuracy"].mean()
     acc_std  = cv_results["test_accuracy"].std()
@@ -380,23 +397,6 @@ def plot_summary_bar(task_results: dict, save_dir: str) -> None:
     fig, ax = plt.subplots(figsize=(8, 5))
     bars1 = ax.bar(x - w/2, accs, w, yerr=stds, capsize=4,
                    label="Accuracy (%)", color="steelblue", alpha=0.85)
-    bars2 = ax.bar(x + w/2, [a * 100 for a in aucs], w,
-                   label="ROC-AUC (×100)", color="darkorange", alpha=0.85)
-
-    ax.set_xticks(x)
-    ax.set_xticklabels([t.replace("_", "\n") for t in tasks], fontsize=9)
-    ax.set_ylabel("Score (%)")
-    ax.set_title("Pairwise Classification Summary\n(10-Fold CV, Linear SVM + SFS)")
-    ax.legend()
-    ax.set_ylim(0, 115)
-    for bar in bars1:
-        ax.text(bar.get_x() + bar.get_width()/2,
-                bar.get_height() + 1.5,
-                f"{bar.get_height():.1f}", ha="center", va="bottom", fontsize=8)
-    for bar in bars2:
-        ax.text(bar.get_x() + bar.get_width()/2,
-                bar.get_height() + 1.5,
-                f"{bar.get_height():.1f}", ha="center", va="bottom", fontsize=8)
     plt.tight_layout()
     fpath = os.path.join(save_dir, "summary_all_tasks.png")
     fig.savefig(fpath, dpi=150)
