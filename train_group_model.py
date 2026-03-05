@@ -289,6 +289,7 @@ def create_group_splits(y_labels, subjects, clip_ids, config, val_ratio=0.15, te
     # Convert to masks
     train_mask = np.zeros(n_samples, dtype=bool)
     val_mask = np.zeros(n_samples, dtype=bool)
+    test_mask = np.zeros(n_samples, dtype=bool)  # FIX: Initialize test_mask
     
     train_mask[train_indices] = True
     val_mask[val_indices] = True
