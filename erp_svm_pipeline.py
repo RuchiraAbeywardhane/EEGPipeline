@@ -40,6 +40,7 @@ from collections import Counter
 from sklearn.svm import SVC
 from sklearn.multiclass import OneVsRestClassifier
 from sklearn.preprocessing import StandardScaler, label_binarize
+from sklearn.pipeline import Pipeline
 from sklearn.model_selection import GroupKFold, cross_val_predict, cross_validate, cross_val_score
 from sklearn.metrics import (
     confusion_matrix, ConfusionMatrixDisplay,
@@ -140,41 +141,45 @@ def run_sfs(X: np.ndarray, y: np.ndarray,
             groups: np.ndarray,
             feat_names: list[str]) -> tuple[np.ndarray, list[str], list[int]]:
     """
-    Manual Sequential Forward Selection using cross_val_score with GroupKFold.
-    Iteratively adds the feature that most improves CV accuracy.
-    Stops when no candidate improves accuracy by more than tol=1e-4.
+    Manual Sequential Forward Selection.
+    Each candidate is scored using a Pipeline(scaler + SVM) inside GroupKFold
+    so the scaler is fit only on the training fold — no leakage.
     """
     n_clips     = len(np.unique(groups))
     inner_folds = min(SFS_CV, n_clips)
     print(f"\n  Running SFS  (GroupKFold, {inner_folds} inner folds, "
           f"{n_clips} clips) …")
+    print(f"  ℹ️  Scaler fitted inside each fold — no leakage")
 
-    base_svm = SVC(kernel="linear", C=SVM_C,
-                   decision_function_shape="ovr",
-                   probability=False, random_state=Config.SEED)
+    # Pipeline: scaler is re-fit on train fold only at each CV split
+    pipe = Pipeline([
+        ("scaler", StandardScaler()),
+        ("svm",    SVC(kernel="linear", C=SVM_C,
+                       decision_function_shape="ovr",
+                       probability=False, random_state=Config.SEED))
+    ])
     cv = GroupKFold(n_splits=inner_folds)
 
-    n_features      = X.shape[1]
-    selected        = []          # indices of selected features
-    remaining       = list(range(n_features))
-    best_score      = 0.0
-    tol             = 1e-4
+    n_features = X.shape[1]
+    selected   = []
+    remaining  = list(range(n_features))
+    best_score = 0.0
+    tol        = 1e-4
 
     while remaining:
         candidate_scores = {}
         for feat_idx in remaining:
             candidate = selected + [feat_idx]
             score = cross_val_score(
-                base_svm, X[:, candidate], y,
+                pipe, X[:, candidate], y,
                 groups=groups, cv=cv,
                 scoring="accuracy", n_jobs=-1
             ).mean()
             candidate_scores[feat_idx] = score
 
-        best_candidate = max(candidate_scores, key=candidate_scores.get)
+        best_candidate       = max(candidate_scores, key=candidate_scores.get)
         best_candidate_score = candidate_scores[best_candidate]
 
-        # Stop if improvement is below tolerance
         if best_candidate_score <= best_score + tol:
             break
 
@@ -203,44 +208,48 @@ def run_cross_validation(X: np.ndarray, y: np.ndarray,
                          groups: np.ndarray,
                          class_labels: list) -> dict:
     """
-    10-fold GroupKFold CV with a Linear SVM (one-vs-rest multiclass).
-    Groups = clip_ids → no clip leaks across folds.
-
-    Returns accuracy, 4×4 confusion matrix, per-class & macro ROC-AUC.
+    10-fold GroupKFold CV with Pipeline(StandardScaler + Linear SVM).
+    Scaler is fit only on the training fold at each split — no leakage.
+    GroupKFold on clip_ids — no clip leaks across folds.
     """
     n_clips     = len(np.unique(groups))
     outer_folds = min(CV_FOLDS, n_clips)
     print(f"\n  10-Fold GroupKFold CV  ({outer_folds} folds, {n_clips} clips)")
-    print(f"  ℹ️  Clip-independent: YES  |  Subject-dependent: YES")
+    print(f"  ℹ️  Clip-independent : YES")
+    print(f"  ℹ️  Subject-dependent: YES")
+    print(f"  ℹ️  Scaler per-fold  : YES  (no scaler leakage)")
 
-    svm_clf = SVC(kernel="linear", C=SVM_C,
-                  decision_function_shape="ovr",
-                  probability=True, random_state=Config.SEED)
+    # Pipeline ensures scaler is re-fit on each fold's training data only
+    pipe = Pipeline([
+        ("scaler", StandardScaler()),
+        ("svm",    SVC(kernel="linear", C=SVM_C,
+                       decision_function_shape="ovr",
+                       probability=True, random_state=Config.SEED))
+    ])
 
     cv = GroupKFold(n_splits=outer_folds)
 
     cv_results = cross_validate(
-        svm_clf, X, y,
+        pipe, X, y,
         groups=groups, cv=cv,
         scoring=["accuracy"],
         return_train_score=False,
         n_jobs=-1,
     )
 
-    y_pred = cross_val_predict(svm_clf, X, y,
+    y_pred = cross_val_predict(pipe, X, y,
                                groups=groups, cv=cv,
                                method="predict", n_jobs=-1)
-    y_prob = cross_val_predict(svm_clf, X, y,
+    y_prob = cross_val_predict(pipe, X, y,
                                groups=groups, cv=cv,
-                               method="predict_proba", n_jobs=-1)  # (N, 4)
+                               method="predict_proba", n_jobs=-1)
 
     acc     = cv_results["test_accuracy"].mean()
     acc_std = cv_results["test_accuracy"].std()
     cm      = confusion_matrix(y, y_pred, labels=class_labels)
 
-    # Binarise labels for OvR ROC-AUC
-    y_bin       = label_binarize(y, classes=class_labels)
-    roc_auc_per = {}
+    y_bin         = label_binarize(y, classes=class_labels)
+    roc_auc_per   = {}
     for i, lbl in enumerate(class_labels):
         if y_bin[:, i].sum() > 0:
             roc_auc_per[lbl] = roc_auc_score(y_bin[:, i], y_prob[:, i])
@@ -437,23 +446,26 @@ def main():
     print(f"\n  Feature matrix : {X_erp.shape}")
     print(f"  Feature names  : {feat_names}")
 
-    # ── 3. Standardise ───────────────────────────────────────────────────────
-    scaler   = StandardScaler()
-    X_scaled = scaler.fit_transform(X_erp)
+    # NOTE: No global StandardScaler here — scaling is done inside each CV fold
+    # via the Pipeline in run_sfs() and run_cross_validation()
 
-    # ── 4. Sequential Forward Selection ──────────────────────────────────────
-    # Use integer-encoded labels for SFS (SVC requirement)
+    # ── 3. Encode labels ──────────────────────────────────────────────────────
     label_enc   = {l: i for i, l in enumerate(CLASS_LABELS)}
     y_int_clean = np.array([label_enc[l] for l in y_str])
 
-    X_sel, sel_names, _ = run_sfs(X_scaled, y_int_clean, clip_ids, feat_names)
+    # ── 4. Sequential Forward Selection (unscaled input — pipe scales inside) ─
+    X_sel, sel_names, sel_indices = run_sfs(
+        X_erp, y_int_clean, clip_ids, feat_names
+    )
 
     # ── 5. 10-Fold GroupKFold cross-validation ────────────────────────────────
     print(f"\n{'='*70}")
     print("4-CLASS CROSS-VALIDATION")
     print(f"{'='*70}")
-    results = run_cross_validation(X_sel, y_int_clean, clip_ids,
-                                   list(range(len(CLASS_LABELS))))
+    results = run_cross_validation(
+        X_erp[:, sel_indices], y_int_clean, clip_ids,
+        list(range(len(CLASS_LABELS)))
+    )
 
     # ── 6. Visualisations ─────────────────────────────────────────────────────
     plot_confusion_matrix(results["confusion_matrix"],
