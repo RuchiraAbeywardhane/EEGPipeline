@@ -29,6 +29,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 from sklearn.metrics import f1_score, classification_report, confusion_matrix
+from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
 import seaborn as sns
 
@@ -288,7 +289,6 @@ def create_group_splits(y_labels, subjects, clip_ids, config, val_ratio=0.15, te
     # Convert to masks
     train_mask = np.zeros(n_samples, dtype=bool)
     val_mask = np.zeros(n_samples, dtype=bool)
-    test_mask = np.zeros(n_samples, dtype=bool)
     
     train_mask[train_indices] = True
     val_mask[val_indices] = True
@@ -422,6 +422,308 @@ def create_group_splits_clip_independent(y_labels, subjects, clip_ids, config, v
         print(f"   {split_name.capitalize()} class dist: {dist}")
     
     return split_indices
+
+
+# ==================================================
+# VISUALIZATION FUNCTIONS (JDA-STYLE)
+# ==================================================
+
+def plot_tsne_features(model, X_features, y_labels, subjects, label_to_id, config, save_path, title="t-SNE Feature Visualization"):
+    """
+    Create t-SNE visualization of learned features (like JDA paper).
+    
+    Args:
+        model: Trained model
+        X_features: (N, input_dim) features
+        y_labels: (N,) emotion labels
+        subjects: (N,) subject IDs
+        label_to_id: Label mapping
+        config: Configuration object
+        save_path: Path to save visualization
+        title: Plot title
+    """
+    print(f"\n🎨 Creating t-SNE visualization: {title}")
+    
+    model.eval()
+    device = next(model.parameters()).device
+    
+    # Extract intermediate features (128-dim from feature_extractor)
+    with torch.no_grad():
+        X_tensor = torch.from_numpy(X_features).float().to(device)
+        
+        # Get features from feature extractor
+        features = model.feature_extractor(X_tensor)
+        features_np = features.cpu().numpy()
+    
+    print(f"   Feature shape: {features_np.shape}")
+    
+    # Sample for t-SNE (max 2000 points for speed)
+    if len(features_np) > 2000:
+        sample_indices = np.random.choice(len(features_np), 2000, replace=False)
+        features_sample = features_np[sample_indices]
+        labels_sample = y_labels[sample_indices]
+        subjects_sample = subjects[sample_indices]
+    else:
+        features_sample = features_np
+        labels_sample = y_labels
+        subjects_sample = subjects
+    
+    print(f"   Running t-SNE on {len(features_sample)} samples...")
+    
+    # Run t-SNE
+    tsne = TSNE(n_components=2, perplexity=30, n_iter=3000, random_state=config.SEED, init='pca')
+    tsne_result = tsne.fit_transform(features_sample)
+    
+    # Normalize to [0, 1] for consistent plotting
+    x_min, x_max = tsne_result.min(0), tsne_result.max(0)
+    tsne_norm = (tsne_result - x_min) / (x_max - x_min)
+    
+    # Create plots
+    id2lab = {v: k for k, v in label_to_id.items()}
+    colors = plt.cm.tab10(np.linspace(0, 1, config.NUM_CLASSES))
+    
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    
+    # Plot 1: Color by emotion class
+    ax = axes[0]
+    for class_id in range(config.NUM_CLASSES):
+        mask = (labels_sample == class_id)
+        if mask.any():
+            ax.scatter(tsne_norm[mask, 0], tsne_norm[mask, 1],
+                      c=[colors[class_id]], label=id2lab[class_id],
+                      s=20, alpha=0.6, edgecolors='none')
+    
+    ax.set_title(f'{title}\n(Colored by Emotion)', fontsize=14, fontweight='bold')
+    ax.set_xlabel('t-SNE Dimension 1', fontsize=12)
+    ax.set_ylabel('t-SNE Dimension 2', fontsize=12)
+    ax.legend(loc='best', fontsize=10, framealpha=0.9)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.grid(True, alpha=0.3)
+    
+    # Plot 2: Color by subject (domain)
+    ax = axes[1]
+    unique_subjects = np.unique(subjects_sample)
+    subject_colors = plt.cm.Set3(np.linspace(0, 1, len(unique_subjects)))
+    
+    for idx, subject_id in enumerate(unique_subjects):
+        mask = (subjects_sample == subject_id)
+        if mask.any():
+            ax.scatter(tsne_norm[mask, 0], tsne_norm[mask, 1],
+                      c=[subject_colors[idx]], label=f'Subject {subject_id}',
+                      s=20, alpha=0.6, edgecolors='none')
+    
+    ax.set_title(f'{title}\n(Colored by Subject/Domain)', fontsize=14, fontweight='bold')
+    ax.set_xlabel('t-SNE Dimension 1', fontsize=12)
+    ax.set_ylabel('t-SNE Dimension 2', fontsize=12)
+    ax.legend(loc='best', fontsize=8, framealpha=0.9, ncol=2)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"   ✅ Saved: {save_path}")
+    plt.close()
+
+
+def plot_training_curves(history, save_path, title="Training Curves"):
+    """
+    Plot training loss and validation metrics over epochs.
+    
+    Args:
+        history: Dict with 'train_loss', 'val_acc', 'val_f1' lists
+        save_path: Path to save plot
+        title: Plot title
+    """
+    print(f"\n📈 Creating training curves: {title}")
+    
+    epochs = range(1, len(history['train_loss']) + 1)
+    
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    
+    # Plot 1: Training Loss
+    ax = axes[0]
+    ax.plot(epochs, history['train_loss'], 'b-', linewidth=2, label='Training Loss')
+    ax.set_title('Training Loss', fontsize=14, fontweight='bold')
+    ax.set_xlabel('Epoch', fontsize=12)
+    ax.set_ylabel('Loss', fontsize=12)
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3)
+    
+    # Plot 2: Validation Accuracy
+    ax = axes[1]
+    ax.plot(epochs, history['val_acc'], 'g-', linewidth=2, label='Validation Accuracy')
+    ax.axhline(y=max(history['val_acc']), color='r', linestyle='--', linewidth=1, alpha=0.5, label=f'Best: {max(history["val_acc"]):.3f}')
+    ax.set_title('Validation Accuracy', fontsize=14, fontweight='bold')
+    ax.set_xlabel('Epoch', fontsize=12)
+    ax.set_ylabel('Accuracy', fontsize=12)
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim([0, 1])
+    
+    # Plot 3: Validation F1 Score
+    ax = axes[2]
+    ax.plot(epochs, history['val_f1'], 'orange', linewidth=2, label='Validation F1-Score')
+    ax.axhline(y=max(history['val_f1']), color='r', linestyle='--', linewidth=1, alpha=0.5, label=f'Best: {max(history["val_f1"]):.3f}')
+    ax.set_title('Validation F1-Score (Macro)', fontsize=14, fontweight='bold')
+    ax.set_xlabel('Epoch', fontsize=12)
+    ax.set_ylabel('F1-Score', fontsize=12)
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim([0, 1])
+    
+    plt.suptitle(title, fontsize=16, fontweight='bold', y=1.02)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"   ✅ Saved: {save_path}")
+    plt.close()
+
+
+def plot_per_class_performance(y_true, y_pred, label_to_id, save_path, title="Per-Class Performance"):
+    """
+    Create detailed per-class performance visualization.
+    
+    Args:
+        y_true: True labels
+        y_pred: Predicted labels
+        label_to_id: Label mapping
+        save_path: Path to save plot
+        title: Plot title
+    """
+    print(f"\n📊 Creating per-class performance plot: {title}")
+    
+    from sklearn.metrics import precision_recall_fscore_support
+    
+    id2lab = {v: k for k, v in label_to_id.items()}
+    class_names = [id2lab[i] for i in range(len(label_to_id))]
+    
+    # Calculate per-class metrics
+    precision, recall, f1, support = precision_recall_fscore_support(
+        y_true, y_pred, average=None, zero_division=0
+    )
+    
+    # Create bar plot
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    
+    x_pos = np.arange(len(class_names))
+    width = 0.6
+    
+    # Plot 1: Precision
+    ax = axes[0, 0]
+    bars = ax.bar(x_pos, precision, width, color='skyblue', edgecolor='navy', linewidth=1.5)
+    ax.set_title('Precision per Class', fontsize=14, fontweight='bold')
+    ax.set_ylabel('Precision', fontsize=12)
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(class_names, rotation=45, ha='right')
+    ax.set_ylim([0, 1])
+    ax.grid(axis='y', alpha=0.3)
+    ax.axhline(y=precision.mean(), color='r', linestyle='--', linewidth=1, alpha=0.5, label=f'Mean: {precision.mean():.3f}')
+    ax.legend()
+    for i, (bar, val) in enumerate(zip(bars, precision)):
+        ax.text(bar.get_x() + bar.get_width()/2, val + 0.02, f'{val:.2f}', ha='center', va='bottom', fontsize=10)
+    
+    # Plot 2: Recall
+    ax = axes[0, 1]
+    bars = ax.bar(x_pos, recall, width, color='lightgreen', edgecolor='darkgreen', linewidth=1.5)
+    ax.set_title('Recall per Class', fontsize=14, fontweight='bold')
+    ax.set_ylabel('Recall', fontsize=12)
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(class_names, rotation=45, ha='right')
+    ax.set_ylim([0, 1])
+    ax.grid(axis='y', alpha=0.3)
+    ax.axhline(y=recall.mean(), color='r', linestyle='--', linewidth=1, alpha=0.5, label=f'Mean: {recall.mean():.3f}')
+    ax.legend()
+    for i, (bar, val) in enumerate(zip(bars, recall)):
+        ax.text(bar.get_x() + bar.get_width()/2, val + 0.02, f'{val:.2f}', ha='center', va='bottom', fontsize=10)
+    
+    # Plot 3: F1-Score
+    ax = axes[1, 0]
+    bars = ax.bar(x_pos, f1, width, color='lightcoral', edgecolor='darkred', linewidth=1.5)
+    ax.set_title('F1-Score per Class', fontsize=14, fontweight='bold')
+    ax.set_ylabel('F1-Score', fontsize=12)
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(class_names, rotation=45, ha='right')
+    ax.set_ylim([0, 1])
+    ax.grid(axis='y', alpha=0.3)
+    ax.axhline(y=f1.mean(), color='r', linestyle='--', linewidth=1, alpha=0.5, label=f'Mean: {f1.mean():.3f}')
+    ax.legend()
+    for i, (bar, val) in enumerate(zip(bars, f1)):
+        ax.text(bar.get_x() + bar.get_width()/2, val + 0.02, f'{val:.2f}', ha='center', va='bottom', fontsize=10)
+    
+    # Plot 4: Support (sample count)
+    ax = axes[1, 1]
+    bars = ax.bar(x_pos, support, width, color='plum', edgecolor='purple', linewidth=1.5)
+    ax.set_title('Support (Sample Count) per Class', fontsize=14, fontweight='bold')
+    ax.set_ylabel('Number of Samples', fontsize=12)
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(class_names, rotation=45, ha='right')
+    ax.grid(axis='y', alpha=0.3)
+    for i, (bar, val) in enumerate(zip(bars, support)):
+        ax.text(bar.get_x() + bar.get_width()/2, val + 5, f'{int(val)}', ha='center', va='bottom', fontsize=10)
+    
+    plt.suptitle(title, fontsize=16, fontweight='bold', y=0.995)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"   ✅ Saved: {save_path}")
+    plt.close()
+
+
+def visualize_loso_results(results, save_path, title="LOSO Cross-Validation Results"):
+    """
+    Visualize LOSO (Leave-One-Subject-Out) results across all test subjects.
+    
+    Args:
+        results: List of tuples (test_subject, accuracy, f1_score)
+        save_path: Path to save plot
+        title: Plot title
+    """
+    print(f"\n📊 Creating LOSO results visualization: {title}")
+    
+    subjects = [r[0] for r in results]
+    accuracies = [r[1] for r in results]
+    f1_scores = [r[2] for r in results]
+    
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    
+    x_pos = np.arange(len(subjects))
+    width = 0.35
+    
+    # Plot 1: Accuracy per test subject
+    ax = axes[0]
+    bars = ax.bar(x_pos, accuracies, width, color='skyblue', edgecolor='navy', linewidth=1.5, label='Accuracy')
+    ax.axhline(y=np.mean(accuracies), color='r', linestyle='--', linewidth=2, label=f'Mean: {np.mean(accuracies):.3f}')
+    ax.set_title('Accuracy per Test Subject (LOSO)', fontsize=14, fontweight='bold')
+    ax.set_ylabel('Accuracy', fontsize=12)
+    ax.set_xlabel('Test Subject', fontsize=12)
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels([f'S{s}' for s in subjects], rotation=45, ha='right')
+    ax.set_ylim([0, 1])
+    ax.legend(fontsize=11)
+    ax.grid(axis='y', alpha=0.3)
+    for bar, val in zip(bars, accuracies):
+        ax.text(bar.get_x() + bar.get_width()/2, val + 0.02, f'{val:.2f}', ha='center', va='bottom', fontsize=9)
+    
+    # Plot 2: F1-Score per test subject
+    ax = axes[1]
+    bars = ax.bar(x_pos, f1_scores, width, color='lightcoral', edgecolor='darkred', linewidth=1.5, label='F1-Score')
+    ax.axhline(y=np.mean(f1_scores), color='r', linestyle='--', linewidth=2, label=f'Mean: {np.mean(f1_scores):.3f}')
+    ax.set_title('F1-Score per Test Subject (LOSO)', fontsize=14, fontweight='bold')
+    ax.set_ylabel('F1-Score (Macro)', fontsize=12)
+    ax.set_xlabel('Test Subject', fontsize=12)
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels([f'S{s}' for s in subjects], rotation=45, ha='right')
+    ax.set_ylim([0, 1])
+    ax.legend(fontsize=11)
+    ax.grid(axis='y', alpha=0.3)
+    for bar, val in zip(bars, f1_scores):
+        ax.text(bar.get_x() + bar.get_width()/2, val + 0.02, f'{val:.2f}', ha='center', va='bottom', fontsize=9)
+    
+    plt.suptitle(title, fontsize=16, fontweight='bold', y=0.98)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"   ✅ Saved: {save_path}")
+    plt.close()
 
 
 # ==================================================
@@ -630,6 +932,11 @@ def train_group_model(X_features, y_labels, split_indices, label_to_id, config, 
     print(f"\n💾 Saved confusion matrix: confusion_matrix_{group_name}.png")
     plt.close()
     
+    # Visualizations
+    plot_tsne_features(model, X_features, y_labels, subjects, label_to_id, config, f'tsne_{group_name}.png')
+    plot_training_curves(history, f'training_curves_{group_name}.png')
+    plot_per_class_performance(all_targets, all_preds, label_to_id, f'per_class_performance_{group_name}.png')
+    
     return model, history, (test_acc, test_f1)
 
 
@@ -717,6 +1024,9 @@ def main():
         print(f"\n   Average Accuracy: {avg_acc:.3f} ({avg_acc*100:.1f}%)")
         print(f"   Average Macro-F1: {avg_f1:.3f}")
         
+        # Visualize LOSO results
+        visualize_loso_results(results, f'loso_results_{group_name}.png')
+    
     else:
         # Group mode: train on all subjects
         if args.clip_independent:
