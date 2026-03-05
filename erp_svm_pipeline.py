@@ -40,13 +40,12 @@ from collections import Counter
 from sklearn.svm import SVC
 from sklearn.multiclass import OneVsRestClassifier
 from sklearn.preprocessing import StandardScaler, label_binarize
-from sklearn.model_selection import GroupKFold, cross_val_predict, cross_validate
+from sklearn.model_selection import GroupKFold, cross_val_predict, cross_validate, cross_val_score
 from sklearn.metrics import (
     confusion_matrix, ConfusionMatrixDisplay,
     roc_auc_score, roc_curve, auc,
     classification_report
 )
-from sklearn.feature_selection import SequentialFeatureSelector
 
 from eeg_config import Config
 from eeg_data_loader_emognitionRaw import load_eeg_data
@@ -141,8 +140,9 @@ def run_sfs(X: np.ndarray, y: np.ndarray,
             groups: np.ndarray,
             feat_names: list[str]) -> tuple[np.ndarray, list[str], list[int]]:
     """
-    SFS using a Linear SVM (OvR) with GroupKFold inner CV.
-    Stops automatically when accuracy no longer improves (tol=1e-4).
+    Manual Sequential Forward Selection using cross_val_score with GroupKFold.
+    Iteratively adds the feature that most improves CV accuracy.
+    Stops when no candidate improves accuracy by more than tol=1e-4.
     """
     n_clips     = len(np.unique(groups))
     inner_folds = min(SFS_CV, n_clips)
@@ -152,28 +152,47 @@ def run_sfs(X: np.ndarray, y: np.ndarray,
     base_svm = SVC(kernel="linear", C=SVM_C,
                    decision_function_shape="ovr",
                    probability=False, random_state=Config.SEED)
+    cv = GroupKFold(n_splits=inner_folds)
 
-    sfs = SequentialFeatureSelector(
-        estimator            = base_svm,
-        n_features_to_select = "auto",
-        tol                  = 1e-4,
-        direction            = SFS_DIRECTION,
-        scoring              = "accuracy",
-        cv                   = GroupKFold(n_splits=inner_folds),
-        n_jobs               = -1,
-    )
-    sfs.fit(X, y, groups=groups)
+    n_features      = X.shape[1]
+    selected        = []          # indices of selected features
+    remaining       = list(range(n_features))
+    best_score      = 0.0
+    tol             = 1e-4
 
-    support     = sfs.get_support()
-    sel_indices = list(np.where(support)[0])
-    sel_names   = [feat_names[i] for i in sel_indices]
-    X_sel       = X[:, support]
+    while remaining:
+        candidate_scores = {}
+        for feat_idx in remaining:
+            candidate = selected + [feat_idx]
+            score = cross_val_score(
+                base_svm, X[:, candidate], y,
+                groups=groups, cv=cv,
+                scoring="accuracy", n_jobs=-1
+            ).mean()
+            candidate_scores[feat_idx] = score
 
-    print(f"  ✅ SFS selected {len(sel_indices)} / {X.shape[1]} features:")
+        best_candidate = max(candidate_scores, key=candidate_scores.get)
+        best_candidate_score = candidate_scores[best_candidate]
+
+        # Stop if improvement is below tolerance
+        if best_candidate_score <= best_score + tol:
+            break
+
+        selected.append(best_candidate)
+        remaining.remove(best_candidate)
+        best_score = best_candidate_score
+        print(f"     + {feat_names[best_candidate]:25s}  "
+              f"→ CV acc = {best_score*100:.2f}%  "
+              f"(total selected: {len(selected)})")
+
+    sel_names = [feat_names[i] for i in selected]
+    X_sel     = X[:, selected]
+
+    print(f"  ✅ SFS selected {len(selected)} / {n_features} features:")
     for name in sel_names:
         print(f"     • {name}")
 
-    return X_sel, sel_names, sel_indices
+    return X_sel, sel_names, selected
 
 
 # ──────────────────────────────────────────────────────────────────────────────
