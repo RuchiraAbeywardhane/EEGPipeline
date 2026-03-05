@@ -79,14 +79,14 @@ def main():
     print(f"Baseline Reduction: {config.USE_BASELINE_REDUCTION}")
     print("=" * 80)
     
-    # Step 1: Load EEG data (RAW dataset returns: X_raw, y_labels, subject_ids, label_to_id)
-    eeg_X_raw, eeg_y, eeg_subjects, label_to_id = load_eeg_data(config.DATA_ROOT, config)
+    # Step 1: Load EEG data (RAW dataset returns: X_raw, y_labels, subject_ids, label_to_id, clip_ids)
+    eeg_X_raw, eeg_y, eeg_subjects, label_to_id, eeg_clip_ids = load_eeg_data(config.DATA_ROOT, config)
     
     # Step 2: Extract features
     eeg_X_features = extract_eeg_features(eeg_X_raw, config)
     
-    # Step 3: Create data splits
-    split_indices = create_data_splits(eeg_y, eeg_subjects, config)
+    # Step 3: Create data splits (now requires clip_ids to prevent leakage)
+    split_indices = create_data_splits(eeg_y, eeg_subjects, eeg_clip_ids, config)
     
     # Step 4: Train EEG model
     eeg_model, eeg_mu, eeg_sd = train_eeg_model(eeg_X_features, eeg_y, split_indices, label_to_id, config)

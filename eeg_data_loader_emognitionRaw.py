@@ -256,6 +256,7 @@ def load_eeg_data(data_root, config):
         y_labels: (N,) - Class labels as integers
         subject_ids: (N,) - Subject IDs for each window
         label_to_id: Dictionary mapping label names to integers
+        clip_ids: (N,) - Clip IDs for each window
     """
     print("\n" + "="*80)
     print("LOADING EEG DATA (MUSE) - RAW DATASET")
@@ -290,7 +291,7 @@ def load_eeg_data(data_root, config):
         print(f"\n🔧 Baseline Reduction: DISABLED")
     
     # Prepare windowing parameters
-    all_windows, all_labels, all_subjects = [], [], []
+    all_windows, all_labels, all_subjects, all_clip_ids = [], [], [], []  # ✅ Add clip tracking
     win_samples = int(config.EEG_WINDOW_SEC * config.EEG_FS)
     step_samples = int(win_samples * (1.0 - config.EEG_OVERLAP))
     
@@ -327,6 +328,7 @@ def load_eeg_data(data_root, config):
             continue
         
         superclass = config.SUPERCLASS_MAP[emotion]
+        clip_id = f"{subject}_{emotion}"  # ✅ Unique identifier for this recording
         
         try:
             with open(fpath, "r") as f:
@@ -395,6 +397,7 @@ def load_eeg_data(data_root, config):
                     all_windows.append(window)
                     all_labels.append(superclass)
                     all_subjects.append(subject)
+                    all_clip_ids.append(clip_id)  # ✅ Track which recording this window came from
         
         except Exception as e:
             skipped_reasons['parse_error'] += 1
@@ -419,6 +422,7 @@ def load_eeg_data(data_root, config):
     label_to_id = {lab: i for i, lab in enumerate(unique_labels)}
     y_labels = np.array([label_to_id[lab] for lab in all_labels], dtype=np.int64)
     subject_ids = np.array(all_subjects)
+    clip_ids = np.array(all_clip_ids)  # ✅ Convert to array
     
     print(f"\n✅ EEG data loaded: {X_raw.shape}")
     print(f"   Label distribution: {Counter(all_labels)}")
@@ -431,7 +435,7 @@ def load_eeg_data(data_root, config):
         if total_files > 0:
             print(f"   📈 Reduction rate: {100*reduced_count/total_files:.1f}%")
     
-    return X_raw, y_labels, subject_ids, label_to_id
+    return X_raw, y_labels, subject_ids, label_to_id, clip_ids  # ✅ Return clip_ids
 
 
 # ==================================================
@@ -551,13 +555,17 @@ def extract_eeg_features(X_raw, config, fs=256.0, eps=1e-12):
 # DATA SPLITTING
 # ==================================================
 
-def create_data_splits(y_labels, subject_ids, config, train_ratio=0.70, val_ratio=0.15, test_ratio=0.15):
+def create_data_splits(y_labels, subject_ids, clip_ids, config, train_ratio=0.70, val_ratio=0.15, test_ratio=0.15):
     """
-    Create train/val/test splits with subject-independent or random strategy.
+    Create train/val/test splits preventing data leakage.
+    
+    CRITICAL: When CLIP_INDEPENDENT=True, this function ensures windows from the
+    same recording NEVER appear in different splits (prevents data leakage).
     
     Args:
         y_labels: Array of class labels
         subject_ids: Array of subject IDs
+        clip_ids: Array of clip/recording IDs (unique per recording)
         config: Configuration object
         train_ratio: Proportion for training set
         val_ratio: Proportion for validation set
@@ -567,13 +575,13 @@ def create_data_splits(y_labels, subject_ids, config, train_ratio=0.70, val_rati
         split_indices: Dictionary with 'train', 'val', 'test' index arrays
     """
     print("\n" + "="*80)
-    print("CREATING DATA SPLIT")
+    print("CREATING DATA SPLIT (LEAK-FREE)")
     print("="*80)
     
     n_samples = len(y_labels)
     
     if config.SUBJECT_INDEPENDENT:
-        print("  Strategy: SUBJECT-INDEPENDENT split")
+        print("  Strategy: SUBJECT-INDEPENDENT (split by subjects)")
         unique_subjects = np.unique(subject_ids)
         np.random.shuffle(unique_subjects)
         
@@ -588,24 +596,34 @@ def create_data_splits(y_labels, subject_ids, config, train_ratio=0.70, val_rati
         val_mask = np.isin(subject_ids, val_subjects)
         test_mask = np.isin(subject_ids, test_subjects)
         
-        print(f"  Train subjects: {len(train_subjects)}")
-        print(f"  Val subjects: {len(val_subjects)}")
-        print(f"  Test subjects: {len(test_subjects)}")
+        print(f"  Train subjects: {train_subjects}")
+        print(f"  Val subjects: {val_subjects}")
+        print(f"  Test subjects: {test_subjects}")
     else:
-        print("  Strategy: RANDOM split")
-        indices = np.arange(n_samples)
-        np.random.shuffle(indices)
+        # Subject-dependent: split by CLIPS (not windows!) to prevent leakage
+        print("  Strategy: SUBJECT-DEPENDENT (split by clips/recordings)")
+        print("  ⚠️  ENFORCING CLIP_INDEPENDENT to prevent data leakage")
         
-        n_test = int(n_samples * test_ratio)
-        n_val = int(n_samples * val_ratio)
+        # Get unique clips
+        unique_clips = np.unique(clip_ids)
+        np.random.shuffle(unique_clips)
         
-        train_mask = np.zeros(n_samples, dtype=bool)
-        val_mask = np.zeros(n_samples, dtype=bool)
-        test_mask = np.zeros(n_samples, dtype=bool)
+        n_test_clips = int(len(unique_clips) * test_ratio)
+        n_val_clips = int(len(unique_clips) * val_ratio)
         
-        test_mask[indices[:n_test]] = True
-        val_mask[indices[n_test:n_test+n_val]] = True
-        train_mask[indices[n_test+n_val:]] = True
+        test_clips = unique_clips[:n_test_clips]
+        val_clips = unique_clips[n_test_clips:n_test_clips+n_val_clips]
+        train_clips = unique_clips[n_test_clips+n_val_clips:]
+        
+        # Assign windows based on which clip they came from
+        train_mask = np.isin(clip_ids, train_clips)
+        val_mask = np.isin(clip_ids, val_clips)
+        test_mask = np.isin(clip_ids, test_clips)
+        
+        print(f"  Total unique clips: {len(unique_clips)}")
+        print(f"  Train clips: {len(train_clips)}")
+        print(f"  Val clips: {len(val_clips)}")
+        print(f"  Test clips: {len(test_clips)}")
     
     split_indices = {
         'train': np.where(train_mask)[0],
