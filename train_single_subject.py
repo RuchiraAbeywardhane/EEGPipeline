@@ -161,9 +161,9 @@ def load_single_subject_data(subject_id, config):
     return X_features_flat, y_subject, clip_ids_subject, label_to_id
 
 
-def create_single_subject_splits(y_labels, clip_ids, config, train_ratio=0.70, val_ratio=0.15):
+def create_single_subject_splits(y_labels, clip_ids, config, train_ratio=0.70, val_ratio=0.15, split_by_clips=True):
     """
-    Split data by recordings (NOT windows) to prevent leakage.
+    Split data by recordings OR by windows.
     
     Args:
         y_labels: (N,) emotion labels
@@ -171,57 +171,105 @@ def create_single_subject_splits(y_labels, clip_ids, config, train_ratio=0.70, v
         config: Configuration object
         train_ratio: Train split ratio
         val_ratio: Validation split ratio
+        split_by_clips: If True, split by recordings (leak-free).
+                        If False, split by windows (like JDA paper).
     
     Returns:
         split_indices: Dict with 'train', 'val', 'test' indices
     """
     print("\n" + "="*80)
-    print("CREATING TRAIN/VAL/TEST SPLIT (BY RECORDINGS)")
+    if split_by_clips:
+        print("CREATING TRAIN/VAL/TEST SPLIT (BY RECORDINGS - LEAK-FREE)")
+    else:
+        print("CREATING TRAIN/VAL/TEST SPLIT (BY WINDOWS - CLIP-DEPENDENT)")
     print("="*80)
     
-    unique_clips = np.unique(clip_ids)
-    n_clips = len(unique_clips)
-    
-    print(f"   Total recordings: {n_clips}")
-    
-    # Get label for each clip (majority vote)
-    clip_labels = {}
-    for clip_id in unique_clips:
-        clip_mask = (clip_ids == clip_id)
-        clip_label = np.bincount(y_labels[clip_mask]).argmax()
-        clip_labels[clip_id] = clip_label
-    
-    # Stratified split by class
-    from collections import defaultdict
-    clips_by_class = defaultdict(list)
-    for clip_id in unique_clips:
-        clips_by_class[clip_labels[clip_id]].append(clip_id)
-    
-    train_clips, val_clips, test_clips = [], [], []
-    
-    for class_id in range(config.NUM_CLASSES):
-        class_clips = np.array(clips_by_class[class_id])
-        n_class = len(class_clips)
+    if split_by_clips:
+        # ==== CLIP-INDEPENDENT: Split by recordings ====
+        unique_clips = np.unique(clip_ids)
+        n_clips = len(unique_clips)
         
-        if n_class == 0:
-            print(f"   ⚠️  No recordings for class {class_id}")
-            continue
+        print(f"   Total recordings: {n_clips}")
         
-        np.random.shuffle(class_clips)
+        # Get label for each clip (majority vote)
+        clip_labels = {}
+        for clip_id in unique_clips:
+            clip_mask = (clip_ids == clip_id)
+            clip_label = np.bincount(y_labels[clip_mask]).argmax()
+            clip_labels[clip_id] = clip_label
         
-        n_test = max(1, int(n_class * (1 - train_ratio - val_ratio)))
-        n_val = max(1, int(n_class * val_ratio))
+        # Stratified split by class
+        from collections import defaultdict
+        clips_by_class = defaultdict(list)
+        for clip_id in unique_clips:
+            clips_by_class[clip_labels[clip_id]].append(clip_id)
         
-        test_clips.extend(class_clips[:n_test])
-        val_clips.extend(class_clips[n_test:n_test+n_val])
-        train_clips.extend(class_clips[n_test+n_val:])
+        train_clips, val_clips, test_clips = [], [], []
         
-        print(f"   Class {class_id}: {n_class} recordings → Train:{len(class_clips[n_test+n_val:])}, Val:{n_val}, Test:{n_test}")
-    
-    # Convert to window indices
-    train_mask = np.isin(clip_ids, train_clips)
-    val_mask = np.isin(clip_ids, val_clips)
-    test_mask = np.isin(clip_ids, test_clips)
+        for class_id in range(config.NUM_CLASSES):
+            class_clips = np.array(clips_by_class[class_id])
+            n_class = len(class_clips)
+            
+            if n_class == 0:
+                print(f"   ⚠️  No recordings for class {class_id}")
+                continue
+            
+            np.random.shuffle(class_clips)
+            
+            n_test = max(1, int(n_class * (1 - train_ratio - val_ratio)))
+            n_val = max(1, int(n_class * val_ratio))
+            
+            test_clips.extend(class_clips[:n_test])
+            val_clips.extend(class_clips[n_test:n_test+n_val])
+            train_clips.extend(class_clips[n_test+n_val:])
+            
+            print(f"   Class {class_id}: {n_class} recordings → Train:{len(class_clips[n_test+n_val:])}, Val:{n_val}, Test:{n_test}")
+        
+        # Convert to window indices
+        train_mask = np.isin(clip_ids, train_clips)
+        val_mask = np.isin(clip_ids, val_clips)
+        test_mask = np.isin(clip_ids, test_clips)
+        
+    else:
+        # ==== CLIP-DEPENDENT: Split by windows (like JDA paper) ====
+        n_samples = len(y_labels)
+        print(f"   Total windows: {n_samples}")
+        
+        # Stratified split by class (directly on windows)
+        from collections import defaultdict
+        windows_by_class = defaultdict(list)
+        for idx in range(n_samples):
+            windows_by_class[y_labels[idx]].append(idx)
+        
+        train_indices, val_indices, test_indices = [], [], []
+        
+        for class_id in range(config.NUM_CLASSES):
+            class_windows = np.array(windows_by_class[class_id])
+            n_class = len(class_windows)
+            
+            if n_class == 0:
+                print(f"   ⚠️  No windows for class {class_id}")
+                continue
+            
+            np.random.shuffle(class_windows)
+            
+            n_test = max(1, int(n_class * (1 - train_ratio - val_ratio)))
+            n_val = max(1, int(n_class * val_ratio))
+            
+            test_indices.extend(class_windows[:n_test])
+            val_indices.extend(class_windows[n_test:n_test+n_val])
+            train_indices.extend(class_windows[n_test+n_val:])
+            
+            print(f"   Class {class_id}: {n_class} windows → Train:{len(class_windows[n_test+n_val:])}, Val:{n_val}, Test:{n_test}")
+        
+        # Convert to masks
+        train_mask = np.zeros(n_samples, dtype=bool)
+        val_mask = np.zeros(n_samples, dtype=bool)
+        test_mask = np.zeros(n_samples, dtype=bool)
+        
+        train_mask[train_indices] = True
+        val_mask[val_indices] = True
+        test_mask[test_indices] = True
     
     split_indices = {
         'train': np.where(train_mask)[0],
@@ -456,6 +504,9 @@ def main():
     parser.add_argument('--feature_mode', type=str, default='handcrafted',
                        choices=['handcrafted', 'deep_cnn', 'deep_transformer'],
                        help='Feature extraction mode')
+    parser.add_argument('--split_mode', type=str, default='clip_independent',
+                       choices=['clip_independent', 'clip_dependent'],
+                       help='Split mode: clip_independent (by recordings) or clip_dependent (by windows)')
     parser.add_argument('--save_model', type=str, default=None, help='Path to save trained model')
     
     args = parser.parse_args()
@@ -468,11 +519,14 @@ def main():
     np.random.seed(config.SEED)
     torch.manual_seed(config.SEED)
     
+    split_by_clips = (args.split_mode == 'clip_independent')
+    
     print("="*80)
     print("SINGLE-SUBJECT EEG TRAINING")
     print("="*80)
     print(f"Subject: {args.subject}")
     print(f"Feature mode: {args.feature_mode}")
+    print(f"Split mode: {args.split_mode}")
     print(f"Device: {config.DEVICE}")
     print(f"Window overlap: 0% (NON-OVERLAPPING)")
     print("="*80)
@@ -480,8 +534,8 @@ def main():
     # Load data for single subject
     X_features, y_labels, clip_ids, label_to_id = load_single_subject_data(args.subject, config)
     
-    # Create splits by recordings
-    split_indices = create_single_subject_splits(y_labels, clip_ids, config)
+    # Create splits (by recordings OR by windows)
+    split_indices = create_single_subject_splits(y_labels, clip_ids, config, split_by_clips=split_by_clips)
     
     # Train model
     model, history, (test_acc, test_f1) = train_single_subject_model(
@@ -496,7 +550,8 @@ def main():
             'subject_id': args.subject,
             'test_acc': test_acc,
             'test_f1': test_f1,
-            'label_to_id': label_to_id
+            'label_to_id': label_to_id,
+            'split_mode': args.split_mode
         }, args.save_model)
         print(f"\n💾 Model saved to: {args.save_model}")
     
