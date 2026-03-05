@@ -304,7 +304,7 @@ def create_group_splits(y_labels, subjects, clip_ids, config, val_ratio=0.15, te
     print(f"\n📊 Window Distribution:")
     print(f"   Train: {len(split_indices['train'])} windows")
     print(f"   Val:   {len(split_indices['val'])} windows")
-    print(f"   Test:  {len(split_indices['test'])} windows")
+    print.f"   Test:  {len(split_indices['test'])} windows")
     
     return split_indices
 
@@ -731,13 +731,14 @@ def visualize_loso_results(results, save_path, title="LOSO Cross-Validation Resu
 # TRAINING FUNCTION
 # ==================================================
 
-def train_group_model(X_features, y_labels, split_indices, label_to_id, config, group_name):
+def train_group_model(X_features, y_labels, subjects, split_indices, label_to_id, config, group_name):
     """
     Train group-specific model.
     
     Args:
         X_features: (N, input_dim) feature array
         y_labels: (N,) label array
+        subjects: (N,) subject IDs array
         split_indices: Dict with train/val/test indices
         label_to_id: Label mapping
         config: Configuration object
@@ -1007,7 +1008,7 @@ def main():
             
             # Train model
             model, history, (test_acc, test_f1) = train_group_model(
-                X_features, y_labels, split_indices, label_to_id, config,
+                X_features, y_labels, subjects, split_indices, label_to_id, config,
                 f"{group_name}_loso_test{test_subject}"
             )
             
@@ -1039,7 +1040,7 @@ def main():
             split_indices = create_group_splits(y_labels, subjects, clip_ids, config)
         
         model, history, (test_acc, test_f1) = train_group_model(
-            X_features, y_labels, split_indices, label_to_id, config, group_name
+            X_features, y_labels, subjects, split_indices, label_to_id, config, group_name
         )
         
         # Save model if requested
