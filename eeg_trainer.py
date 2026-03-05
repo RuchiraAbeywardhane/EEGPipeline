@@ -21,7 +21,7 @@ from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 
 from sklearn.metrics import f1_score, classification_report
 
-from eeg_bilstm_model import SimpleBiLSTMClassifier
+from eeg_bilstm_model import SimpleBiLSTMClassifier, compute_associative_loss
 
 
 def mixup_data(x, y, alpha=0.2):
@@ -47,25 +47,31 @@ def mixup_criterion(criterion, pred, y_a, y_b, lam):
 def train_eeg_model(X_features, y_labels, split_indices, label_mapping, config):
     """Train EEG BiLSTM model with optional domain adaptation."""
     
-    # Domain adaptation is MORE CRITICAL for subject-independent mode!
-    # - Subject-independent: Different people = LARGE domain shift → need DA
-    # - Subject-dependent: Same person, different clips = SMALL domain shift → optional DA
-    use_domain_adaptation = config.SUBJECT_INDEPENDENT  # ✅ CORRECTED!
+    # Determine domain adaptation mode
+    use_domain_adaptation = config.SUBJECT_INDEPENDENT
+    adaptation_mode = config.ADAPTATION_MODE if use_domain_adaptation else 'A'
+    
+    mode_descriptions = {
+        'A': 'No Adaptation (Baseline)',
+        'B': 'Associative Adaptation (Walker + Visit Loss)',
+        'C': 'Adversarial Adaptation (DANN)',
+        'D': 'Combined Adaptation (Associative + Adversarial)'
+    }
     
     if use_domain_adaptation:
         print("\n" + "="*80)
-        print("⚠️  SUBJECT-INDEPENDENT MODE: Using Domain Adaptation")
+        print(f"⚠️  SUBJECT-INDEPENDENT MODE: Using Domain Adaptation Mode {adaptation_mode}")
         print("="*80)
+        print(f"Strategy: {mode_descriptions[adaptation_mode]}")
         print("Domain adaptation helps generalize across DIFFERENT SUBJECTS")
         print("by treating each subject as a different domain.")
-        print("This addresses the domain shift caused by inter-subject variability.")
         print("="*80)
         return train_eeg_model_with_domain_adaptation(
-            X_features, y_labels, split_indices, label_mapping, config
+            X_features, y_labels, split_indices, label_mapping, config, adaptation_mode
         )
     else:
         print("\n" + "="*80)
-        print("✅ SUBJECT-DEPENDENT MODE: Standard Training")
+        print("✅ SUBJECT-DEPENDENT MODE: Standard Training (Mode A)")
         print("="*80)
         print("Training and testing on same subject's data.")
         print("Minimal domain shift - standard training is sufficient.")
@@ -227,10 +233,24 @@ def train_eeg_model_standard(X_features, y_labels, split_indices, label_mapping,
     return model, mu, sd
 
 
-def train_eeg_model_with_domain_adaptation(X_features, y_labels, split_indices, label_mapping, config):
-    """Training with domain adaptation for subject-dependent mode (clip-to-clip transfer)."""
-    print("🔬 Domain Adaptation Strategy: Adversarial Training")
-    print("Treating train clips and test clips as different domains")
+def train_eeg_model_with_domain_adaptation(X_features, y_labels, split_indices, label_mapping, config, adaptation_mode):
+    """
+    Training with domain adaptation for subject-independent mode.
+    
+    Supports 4 modes:
+    - Mode A: No adaptation (baseline)
+    - Mode B: Associative (walker + visit loss)
+    - Mode C: Adversarial (DANN)
+    - Mode D: Combined (associative + adversarial) - BEST
+    """
+    mode_desc = {
+        'A': 'No Adaptation (Baseline)',
+        'B': 'Associative (Walker + Visit Loss)',
+        'C': 'Adversarial (DANN)',
+        'D': 'Combined (Associative + Adversarial)'
+    }
+    print(f"🔬 Domain Adaptation Mode: {adaptation_mode} - {mode_desc[adaptation_mode]}")
+    print("Treating train subjects and test subjects as different domains")
     print("="*80)
     
     train_idx = split_indices['train']
@@ -247,9 +267,9 @@ def train_eeg_model_with_domain_adaptation(X_features, y_labels, split_indices, 
     Xva = (Xva - mu) / sd
     Xte = (Xte - mu) / sd
     
-    print(f"Train (source): {Xtr.shape}, Val (target): {Xva.shape}, Test (target): {Xte.shape}")
+    print(f"Source (train): {Xtr.shape}, Target (val): {Xva.shape}, Target (test): {Xte.shape}")
     
-    # Balanced sampling for source (train)
+    # Balanced sampling
     class_counts = np.bincount(ytr, minlength=config.NUM_CLASSES).astype(np.float32)
     class_sample_weights = 1.0 / np.clip(class_counts, 1.0, None)
     sample_weights = class_sample_weights[ytr]
@@ -267,14 +287,16 @@ def train_eeg_model_with_domain_adaptation(X_features, y_labels, split_indices, 
     te_ds = TensorDataset(torch.from_numpy(Xte), torch.from_numpy(yte))
     
     tr_loader = DataLoader(tr_ds, batch_size=config.EEG_BATCH_SIZE, sampler=train_sampler)
-    va_loader = DataLoader(va_ds, batch_size=config.EEG_BATCH_SIZE, shuffle=True)  # Shuffle target
+    va_loader = DataLoader(va_ds, batch_size=config.EEG_BATCH_SIZE, shuffle=True)
     te_loader = DataLoader(te_ds, batch_size=256, shuffle=False)
     
-    # Model WITH domain adaptation
+    # Model with domain adaptation
+    use_da = (adaptation_mode != 'A')
     model = SimpleBiLSTMClassifier(
         dx=26, n_channels=4, hidden=256, layers=3,
         n_classes=config.NUM_CLASSES, p_drop=0.4,
-        use_domain_adaptation=True  # Enable domain adaptation
+        use_domain_adaptation=use_da,
+        adaptation_mode=adaptation_mode
     ).to(config.DEVICE)
     
     print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
@@ -284,20 +306,23 @@ def train_eeg_model_with_domain_adaptation(X_features, y_labels, split_indices, 
     
     class_weights = torch.from_numpy(class_sample_weights).float().to(config.DEVICE)
     criterion_class = nn.CrossEntropyLoss(weight=class_weights)
-    criterion_domain = nn.CrossEntropyLoss()
+    criterion_domain = nn.CrossEntropyLoss() if adaptation_mode in ['C', 'D'] else None
     
-    # Training loop with domain adaptation
+    # Training loop
     best_f1, best_state, wait = 0.0, None, 0
-    
-    # Create target data iterator
     va_iter = iter(va_loader)
     
     for epoch in range(1, config.EEG_EPOCHS + 1):
         model.train()
-        train_loss, class_loss_sum, domain_loss_sum = 0.0, 0.0, 0.0
+        total_loss_sum = 0.0
+        class_loss_sum = 0.0
+        assoc_loss_sum = 0.0
+        walker_loss_sum = 0.0
+        visit_loss_sum = 0.0
+        domain_loss_sum = 0.0
         n_batches = 0
         
-        # Dynamic lambda for gradient reversal (from DANN paper)
+        # Dynamic lambda for gradient reversal
         p = float(epoch) / config.EEG_EPOCHS
         lambda_da = 2. / (1. + np.exp(-10. * p)) - 1
         
@@ -315,44 +340,102 @@ def train_eeg_model_with_domain_adaptation(X_features, y_labels, split_indices, 
             yb_source = yb_source[:min_size].to(config.DEVICE)
             xb_target = xb_target[:min_size].to(config.DEVICE)
             
-            # Combine source and target
-            xb_combined = torch.cat([xb_source, xb_target], dim=0)
-            
-            # Domain labels: 0 for source (train), 1 for target (val/test)
-            domain_labels = torch.cat([
-                torch.zeros(min_size, dtype=torch.long),
-                torch.ones(min_size, dtype=torch.long)
-            ]).to(config.DEVICE)
-            
             optimizer.zero_grad()
             
-            # Forward pass with domain adaptation
-            class_logits, features, domain_logits = model(xb_combined, lambda_=lambda_da, return_features=True)
+            # MODE A: No adaptation (baseline)
+            if adaptation_mode == 'A':
+                logits = model(xb_source)
+                class_loss = criterion_class(logits, yb_source)
+                total_loss = class_loss
             
-            # Classification loss (only on source data)
-            class_loss = criterion_class(class_logits[:min_size], yb_source)
+            # MODE B: Associative adaptation only
+            elif adaptation_mode == 'B':
+                xb_combined = torch.cat([xb_source, xb_target], dim=0)
+                logits, features = model(xb_combined, return_features=True)
+                
+                # Classification loss (only on source)
+                class_loss = criterion_class(logits[:min_size], yb_source)
+                
+                # Associative loss (walker + visit)
+                source_feats = features[:min_size]
+                target_feats = features[min_size:]
+                assoc_loss, walker_loss, visit_loss = compute_associative_loss(
+                    source_feats, target_feats, yb_source,
+                    walker_weight=config.WALKER_WEIGHT,
+                    visit_weight=config.VISIT_WEIGHT,
+                    temperature=config.TEMPERATURE
+                )
+                
+                total_loss = class_loss + assoc_loss
+                assoc_loss_sum += assoc_loss.item()
+                walker_loss_sum += walker_loss.item()
+                visit_loss_sum += visit_loss.item()
             
-            # Domain adversarial loss (on both source and target)
-            domain_loss = criterion_domain(domain_logits, domain_labels)
+            # MODE C: Adversarial adaptation only
+            elif adaptation_mode == 'C':
+                xb_combined = torch.cat([xb_source, xb_target], dim=0)
+                domain_labels = torch.cat([
+                    torch.zeros(min_size, dtype=torch.long),
+                    torch.ones(min_size, dtype=torch.long)
+                ]).to(config.DEVICE)
+                
+                logits, features, domain_logits = model(xb_combined, lambda_=lambda_da, return_features=True)
+                
+                # Classification loss (only on source)
+                class_loss = criterion_class(logits[:min_size], yb_source)
+                
+                # Domain adversarial loss
+                domain_loss = criterion_domain(domain_logits, domain_labels)
+                
+                total_loss = class_loss + 0.5 * domain_loss
+                domain_loss_sum += domain_loss.item()
             
-            # Combined loss
-            total_loss = class_loss + 0.5 * domain_loss
+            # MODE D: Combined (associative + adversarial)
+            else:  # adaptation_mode == 'D'
+                xb_combined = torch.cat([xb_source, xb_target], dim=0)
+                domain_labels = torch.cat([
+                    torch.zeros(min_size, dtype=torch.long),
+                    torch.ones(min_size, dtype=torch.long)
+                ]).to(config.DEVICE)
+                
+                logits, features, domain_logits = model(xb_combined, lambda_=lambda_da, return_features=True)
+                
+                # Classification loss (only on source)
+                class_loss = criterion_class(logits[:min_size], yb_source)
+                
+                # Associative loss
+                source_feats = features[:min_size]
+                target_feats = features[min_size:]
+                assoc_loss, walker_loss, visit_loss = compute_associative_loss(
+                    source_feats, target_feats, yb_source,
+                    walker_weight=config.WALKER_WEIGHT,
+                    visit_weight=config.VISIT_WEIGHT,
+                    temperature=config.TEMPERATURE
+                )
+                
+                # Domain adversarial loss
+                domain_loss = criterion_domain(domain_logits, domain_labels)
+                
+                total_loss = class_loss + assoc_loss + 0.5 * domain_loss
+                assoc_loss_sum += assoc_loss.item()
+                walker_loss_sum += walker_loss.item()
+                visit_loss_sum += visit_loss.item()
+                domain_loss_sum += domain_loss.item()
             
             total_loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             scheduler.step()
             
-            train_loss += total_loss.item()
+            total_loss_sum += total_loss.item()
             class_loss_sum += class_loss.item()
-            domain_loss_sum += domain_loss.item()
             n_batches += 1
         
-        train_loss /= n_batches
+        # Average losses
+        total_loss_avg = total_loss_sum / n_batches
         class_loss_avg = class_loss_sum / n_batches
-        domain_loss_avg = domain_loss_sum / n_batches
         
-        # Validation (on target domain)
+        # Validation
         model.eval()
         all_preds, all_targets = [], []
         with torch.no_grad():
@@ -367,10 +450,24 @@ def train_eeg_model_with_domain_adaptation(X_features, y_labels, split_indices, 
         val_acc = (all_preds == all_targets).mean()
         val_f1 = f1_score(all_targets, all_preds, average='macro')
         
+        # Print progress
         if epoch % 5 == 0 or epoch < 10:
-            print(f"Epoch {epoch:03d} | Loss: {train_loss:.4f} (Class: {class_loss_avg:.4f}, Domain: {domain_loss_avg:.4f}) | "
-                  f"λ: {lambda_da:.3f} | Val Acc: {val_acc:.3f} | Val F1: {val_f1:.3f}")
+            loss_str = f"Epoch {epoch:03d} | Total: {total_loss_avg:.4f} (Class: {class_loss_avg:.4f}"
+            
+            if adaptation_mode in ['B', 'D']:
+                walker_avg = walker_loss_sum / n_batches
+                visit_avg = visit_loss_sum / n_batches
+                assoc_avg = assoc_loss_sum / n_batches
+                loss_str += f", Assoc: {assoc_avg:.4f} [W:{walker_avg:.4f}, V:{visit_avg:.4f}]"
+            
+            if adaptation_mode in ['C', 'D']:
+                domain_avg = domain_loss_sum / n_batches
+                loss_str += f", Domain: {domain_avg:.4f}, λ: {lambda_da:.3f}"
+            
+            loss_str += f") | Val Acc: {val_acc:.3f} | Val F1: {val_f1:.3f}"
+            print(loss_str)
         
+        # Early stopping
         if val_f1 > best_f1:
             best_f1 = val_f1
             best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
@@ -401,7 +498,7 @@ def train_eeg_model_with_domain_adaptation(X_features, y_labels, split_indices, 
     test_f1 = f1_score(all_targets, all_preds, average='macro')
     
     print("\n" + "="*80)
-    print("EEG TEST RESULTS (with Domain Adaptation)")
+    print(f"EEG TEST RESULTS (Mode {adaptation_mode}: {mode_desc[adaptation_mode]})")
     print("="*80)
     print(f"Test Accuracy: {test_acc:.3f} ({test_acc*100:.1f}%)")
     print(f"Test Macro-F1: {test_f1:.3f}")

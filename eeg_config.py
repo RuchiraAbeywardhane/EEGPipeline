@@ -29,6 +29,18 @@ class Config:
     SUBJECT_INDEPENDENT = True
     CLIP_INDEPENDENT = True  # ⚠️ MUST ALWAYS BE TRUE to prevent data leakage!
     
+    # Domain Adaptation Mode (only used when training with domain adaptation)
+    # 'A': No adaptation (baseline)
+    # 'B': Associative adaptation (walker + visit loss)
+    # 'C': Adversarial adaptation (DANN with gradient reversal)
+    # 'D': Combined (associative + adversarial) - BEST performance
+    ADAPTATION_MODE = 'D'
+    
+    # Associative loss hyperparameters (for modes B and D)
+    WALKER_WEIGHT = 1.0      # Weight for walker loss
+    VISIT_WEIGHT = 0.6       # Weight for visit loss
+    TEMPERATURE = 1.0        # Temperature for similarity softmax
+    
     # Validation: Raise error if misconfigured
     @classmethod
     def validate_config(cls):
@@ -38,6 +50,11 @@ class Config:
                 "CLIP_INDEPENDENT must always be True to prevent data leakage! "
                 "Setting it to False causes windows from the same recording to appear "
                 "in both train and test sets, leading to inflated accuracy."
+            )
+        
+        if cls.ADAPTATION_MODE not in ['A', 'B', 'C', 'D']:
+            raise ValueError(
+                f"ADAPTATION_MODE must be 'A', 'B', 'C', or 'D', got '{cls.ADAPTATION_MODE}'"
             )
     
     # LOSO (Leave-One-Subject-Out) training
