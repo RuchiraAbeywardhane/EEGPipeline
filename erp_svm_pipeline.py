@@ -57,7 +57,6 @@ warnings.filterwarnings("ignore")
 # CONFIGURATION
 # ──────────────────────────────────────────────────────────────────────────────
 
-# 4-class labels and display names (must match Config.SUPERCLASS_MAP values)
 CLASS_LABELS   = ["Q1", "Q2", "Q3", "Q4"]
 CLASS_NAMES    = {
     "Q1": "Amusement\n(Pos/High)",
@@ -65,6 +64,8 @@ CLASS_NAMES    = {
     "Q3": "Sadness\n(Neg/Low)",
     "Q4": "Neutral\n(Pos/Low)",
 }
+# Integer → string key mapping (used inside functions that receive int labels)
+INT_TO_LABEL = {i: l for i, l in enumerate(CLASS_LABELS)}
 
 ERP_WINDOWS = [
     ("N100",      100,  170),
@@ -211,6 +212,7 @@ def run_cross_validation(X: np.ndarray, y: np.ndarray,
     10-fold GroupKFold CV with Pipeline(StandardScaler + Linear SVM).
     Scaler is fit only on the training fold at each split — no leakage.
     GroupKFold on clip_ids — no clip leaks across folds.
+    Reports: overall accuracy, per-class accuracy, confusion matrix, ROC-AUC.
     """
     n_clips     = len(np.unique(groups))
     outer_folds = min(CV_FOLDS, n_clips)
@@ -219,7 +221,6 @@ def run_cross_validation(X: np.ndarray, y: np.ndarray,
     print(f"  ℹ️  Subject-dependent: YES")
     print(f"  ℹ️  Scaler per-fold  : YES  (no scaler leakage)")
 
-    # Pipeline ensures scaler is re-fit on each fold's training data only
     pipe = Pipeline([
         ("scaler", StandardScaler()),
         ("svm",    SVC(kernel="linear", C=SVM_C,
@@ -248,6 +249,13 @@ def run_cross_validation(X: np.ndarray, y: np.ndarray,
     acc_std = cv_results["test_accuracy"].std()
     cm      = confusion_matrix(y, y_pred, labels=class_labels)
 
+    # Per-class accuracy = fraction of that class's samples predicted correctly
+    per_class_acc = {}
+    for i, lbl in enumerate(class_labels):
+        mask = y == lbl
+        if mask.sum() > 0:
+            per_class_acc[lbl] = (y_pred[mask] == lbl).mean()
+
     y_bin         = label_binarize(y, classes=class_labels)
     roc_auc_per   = {}
     for i, lbl in enumerate(class_labels):
@@ -256,18 +264,28 @@ def run_cross_validation(X: np.ndarray, y: np.ndarray,
     roc_auc_macro = roc_auc_score(y_bin, y_prob,
                                    multi_class="ovr", average="macro")
 
-    print(f"\n  ✅ Accuracy   : {acc*100:.2f}% ± {acc_std*100:.2f}%")
-    print(f"     Macro AUC  : {roc_auc_macro:.4f}")
-    for lbl, val in roc_auc_per.items():
-        print(f"     AUC {lbl} ({CLASS_NAMES[lbl].split(chr(10))[0]:12s}): {val:.4f}")
+    print(f"\n  ✅ Overall Accuracy : {acc*100:.2f}% ± {acc_std*100:.2f}%")
+    print(f"     Macro ROC-AUC   : {roc_auc_macro:.4f}")
+
+    print(f"\n  Per-Class Results:")
+    print(f"  {'Class':<10} {'Name':<14} {'Accuracy':>10} {'ROC-AUC':>10}")
+    print(f"  {'-'*46}")
+    for lbl in class_labels:
+        str_lbl  = INT_TO_LABEL.get(lbl, str(lbl))
+        name     = CLASS_NAMES[str_lbl].split("\n")[0]
+        cls_acc  = per_class_acc.get(lbl, float("nan"))
+        cls_auc  = roc_auc_per.get(lbl, float("nan"))
+        print(f"  {str_lbl:<10} {name:<14} {cls_acc*100:>9.2f}% {cls_auc:>10.4f}")
+
     print(f"\n{classification_report(y, y_pred, labels=class_labels, digits=4,\
-                                    target_names=[CLASS_NAMES[l].split(chr(10))[0] for l in class_labels])}")
+                                    target_names=[CLASS_NAMES[INT_TO_LABEL.get(l, str(l))].split(chr(10))[0] for l in class_labels])}")
 
     return {
         "accuracy"        : acc,
         "accuracy_std"    : acc_std,
         "fold_accuracies" : cv_results["test_accuracy"],
         "confusion_matrix": cm,
+        "per_class_acc"   : per_class_acc,
         "roc_auc_macro"   : roc_auc_macro,
         "roc_auc_per"     : roc_auc_per,
         "y_true"          : y,
@@ -283,7 +301,8 @@ def run_cross_validation(X: np.ndarray, y: np.ndarray,
 def plot_confusion_matrix(cm: np.ndarray, class_labels: list,
                           save_dir: str) -> None:
     """Save a 4×4 confusion matrix."""
-    display_names = [CLASS_NAMES[l].replace("\n", "\n") for l in class_labels]
+    display_names = [CLASS_NAMES[INT_TO_LABEL.get(l, str(l))].replace("\n", "\n")
+                     for l in class_labels]
     fig, ax = plt.subplots(figsize=(6, 5))
     ConfusionMatrixDisplay(confusion_matrix=cm,
                            display_labels=display_names
@@ -308,10 +327,11 @@ def plot_roc_curves(y_true: np.ndarray, y_prob: np.ndarray,
         if y_bin[:, i].sum() == 0:
             continue
         fpr, tpr, _ = roc_curve(y_bin[:, i], y_prob[:, i])
-        roc_auc     = auc(fpr, tpr)
-        name        = CLASS_NAMES[lbl].split("\n")[0]
+        roc_auc_val = auc(fpr, tpr)
+        str_lbl     = INT_TO_LABEL.get(lbl, str(lbl))
+        name        = CLASS_NAMES[str_lbl].split("\n")[0]
         ax.plot(fpr, tpr, lw=2, color=col,
-                label=f"{name}  (AUC = {roc_auc:.4f})")
+                label=f"{name}  (AUC = {roc_auc_val:.4f})")
 
     ax.plot([0, 1], [0, 1], "k--", lw=1)
     ax.set_xlabel("False Positive Rate")
@@ -481,14 +501,18 @@ def main():
     print(f"\n{'='*70}")
     print("FINAL RESULTS")
     print(f"{'='*70}")
-    print(f"  Accuracy (10-fold CV) : {results['accuracy']*100:.2f}% "
+    print(f"  Overall Accuracy (10-fold CV) : {results['accuracy']*100:.2f}% "
           f"± {results['accuracy_std']*100:.2f}%")
-    print(f"  Macro ROC-AUC        : {results['roc_auc_macro']:.4f}")
-    print(f"  Per-class ROC-AUC    :")
+    print(f"  Macro ROC-AUC                : {results['roc_auc_macro']:.4f}")
+    print(f"\n  Per-Class Breakdown:")
+    print(f"  {'Class':<10} {'Name':<14} {'Accuracy':>10} {'ROC-AUC':>10}")
+    print(f"  {'-'*46}")
     for i, lbl in enumerate(CLASS_LABELS):
-        auc_val = results["roc_auc_per"].get(i, float("nan"))
-        print(f"     {lbl} ({CLASS_NAMES[lbl].split(chr(10))[0]:12s}): {auc_val:.4f}")
-    print(f"  Selected features ({len(sel_names)}) : {sel_names}")
+        cls_acc = results["per_class_acc"].get(i, float("nan"))
+        cls_auc = results["roc_auc_per"].get(i, float("nan"))
+        name    = CLASS_NAMES[lbl].split("\n")[0]
+        print(f"  {lbl:<10} {name:<14} {cls_acc*100:>9.2f}% {cls_auc:>10.4f}")
+    print(f"\n  Selected features ({len(sel_names)}) : {sel_names}")
     print(f"\n{'='*70}")
     print("✅ ERP-SVM 4-CLASS PIPELINE COMPLETE")
     print(f"   Results saved to: {os.path.abspath(RESULTS_DIR)}")
