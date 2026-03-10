@@ -71,32 +71,33 @@ class Config:
     # Label mappings — EmOgnition dataset (4-class emotion quadrants)
     # ------------------------------------------------------------------
     SUPERCLASS_MAP = {
-        "HAPPINESS": "Q1",  # Positive + High Arousal
+        "AMUSEMENT": "Q1",  # Positive + High Arousal
         "ANGER":     "Q2",  # Negative + High Arousal
         "SADNESS":   "Q3",  # Negative + Low Arousal
-        "FEAR":   "Q4",  # Positive + Low Arousal
-
-        # "AMUSEMENT": "Q1",  # Positive + High Arousal
-        # "ANGER":     "Q2",  # Negative + High Arousal
-        # "SADNESS":   "Q3",  # Negative + Low Arousal
-        # "NEUTRAL":   "Q4",  # Positive + Low Arousal
+        "NEUTRAL":   "Q4",  # Positive + Low Arousal
     }
 
     # ------------------------------------------------------------------
     # Label mappings — New MUSE CSV dataset (Russell's circumplex model)
     # ------------------------------------------------------------------
-    # HAPPINESS → Q1 (Positive Valence, High Arousal)
-    # ANGER     → Q2 (Negative Valence, High Arousal)
-    # FEAR      → Q2 (Negative Valence, High Arousal)  — same quadrant as ANGER
-    # SADNESS   → Q3 (Negative Valence, Low Arousal)
-    # NOTE: Only 3 quadrants are populated (Q4 absent in this dataset).
-    #       The pipeline handles this gracefully via label_to_id.
+    # HAPPINESS → Q1 (Positive Valence,  High Arousal)
+    # ANGER     → Q2 (Negative Valence,  High Arousal)
+    # FEAR      → Q2 (Negative Valence,  High Arousal) — same quadrant as ANGER
+    # SADNESS   → Q3 (Negative Valence,  Low Arousal)
+    #
+    # ⚠️  This dataset produces 3 active quadrants (Q1, Q2, Q3).
+    #     NUM_CLASSES is auto-adjusted in EEGPipeline.py from label_to_id.
     MUSE_CSV_SUPERCLASS_MAP = {
         "HAPPINESS": "Q1",
         "ANGER":     "Q2",
-        "FEAR":      "Q2",
-        "SADNESS":   "Q3",
+        "FEAR":      "Q3",   # ANGER & FEAR share Negative-High-Arousal quadrant
+        "SADNESS":   "Q4",
     }
+
+    # Number of classes — overridden at runtime by EEGPipeline.py
+    # based on the actual unique labels in the loaded dataset.
+    # EmOgnition = 4 classes (Q1–Q4), EmoKey = 3 classes (Q1–Q3)
+    NUM_CLASSES = 4  # will be corrected to 3 automatically for muse_csv
 
     SUPERCLASS_ID  = {"Q1": 0, "Q2": 1, "Q3": 2, "Q4": 3}
     IDX_TO_LABEL   = ["Q1_Positive_Active", "Q2_Negative_Active",
