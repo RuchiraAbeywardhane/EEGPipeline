@@ -24,12 +24,11 @@ class Config:
     # Paths — EmOgnition (original)
     DATA_ROOT_EMOGNITION = "/kaggle/input/datasets/ruchiabey/emognition"
 
-    # Paths — New MUSE CSV dataset
-    # Point to whichever sub-folder you want to use:
-    #   raw data        → muse_wearable_data/raw
-    #   clean signals   → muse_wearable_data/preprocessed/clean-signals
-    #   unclean signals → muse_wearable_data/preprocessed/unclean-signals
-    DATA_ROOT_MUSE_CSV = "/kaggle/input/datasets/ruchiabey/emoky-dataset/EmoKey Moments EEG Dataset (EKM-ED)/muse_wearable_data/preprocessed/clean-signals/0.0078125S"
+    # Paths — New MUSE CSV dataset (EmoKey / EKM-ED)
+    # DATA_ROOT_MUSE_CSV must point to the folder that contains the numbered
+    # subject sub-directories (1/, 2/, 103/ etc.)
+    # i.e. the full path ending in .../clean-signals/0.0078125S
+    DATA_ROOT_MUSE_CSV = "/kaggle/input/emokey-dataset/muse_wearable_data/preprocessed/clean-signals/0.0078125S"
 
     # Active DATA_ROOT (auto-selected below, or override manually)
     DATA_ROOT = DATA_ROOT_EMOGNITION   # will be overridden by validate_config()

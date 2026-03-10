@@ -1,38 +1,36 @@
 """
-EEG Data Loader for MUSE CSV Dataset
-======================================
+EEG Data Loader for MUSE CSV Dataset  (EmoKey / EKM-ED)
+=========================================================
 
-Loads EEG data from the new CSV-based MUSE wearable dataset.
+Actual folder structure on disk
+--------------------------------
+muse_wearable_data/
+└── preprocessed/
+    └── clean-signals/
+        └── 0.0078125S/          ← note the trailing "S"
+            ├── 1/               ← subject ID
+            │   ├── ANGER.csv
+            │   ├── FEAR.csv
+            │   ├── HAPPINESS.csv
+            │   ├── NEUTRAL_ANGER.csv      ← per-emotion neutral baseline
+            │   ├── NEUTRAL_FEAR.csv
+            │   ├── NEUTRAL_HAPPINESS.csv
+            │   ├── NEUTRAL_SADNESS.csv
+            │   └── SADNESS.csv
+            └── 103/
+                └── ...
 
-Dataset folder structure:
-    muse_wearable_data/
-    ├── raw/
-    │   └── <subject_id>/
-    │       ├── muse/
-    │       │   ├── ANGER_XXX.csv
-    │       │   ├── FEAR_XXX.csv
-    │       │   ├── HAPPINESS_XXX.csv
-    │       │   └── SADNESS_XXX.csv
-    │       └── order/   (elicitation order file)
-    └── preprocessed/
-        ├── unclean-signals/
-        │   └── muse/
-        │       └── 0.0078125/   (128 Hz data)
-        └── clean-signals/
-            └── muse/
-                └── 0.0078125/   (128 Hz cleaned data)
-
-CSV column format (MUSE headband):
-    TimeStamp, RAW_TP9, RAW_AF7, RAW_AF8, RAW_TP10,
-    [optional: Delta_TP9 ... HSI_TP9 ...]
+DATA_ROOT should point to the folder that contains the subject-ID subfolders,
+i.e. the full path ending in  .../clean-signals/0.0078125S
 
 Emotion → Quadrant mapping (Russell's circumplex model):
-    HAPPINESS  → Q1  (Positive Valence, High Arousal)
-    ANGER      → Q2  (Negative Valence, High Arousal)
-    FEAR       → Q2  (Negative Valence, High Arousal)   ← same quadrant as ANGER
-    SADNESS    → Q3  (Negative Valence, Low Arousal)
+    HAPPINESS  → Q1  (Positive Valence,  High Arousal)
+    ANGER      → Q2  (Negative Valence,  High Arousal)
+    FEAR       → Q2  (Negative Valence,  High Arousal)
+    SADNESS    → Q3  (Negative Valence,  Low Arousal)
+    NEUTRAL_*  → used as per-emotion baseline (not a class label)
 
-Sampling rate: 128 Hz (downsampled from 256 Hz)
+Sampling rate: 128 Hz  (1 / 0.0078125 s)
 
 Author: Final Year Project
 Date: 2026
@@ -44,24 +42,23 @@ from collections import Counter
 
 import numpy as np
 import pandas as pd
-from scipy.stats import skew, kurtosis
 
 
 # ==================================================
 # CONSTANTS
 # ==================================================
 
-# Column names for the 4 raw EEG channels
 MUSE_RAW_COLS = ["RAW_TP9", "RAW_AF7", "RAW_AF8", "RAW_TP10"]
+HSI_COLS      = ["HSI_TP9", "HSI_AF7", "HSI_AF8", "HSI_TP10"]
 
-# Possible HSI quality column names
-HSI_COLS = ["HSI_TP9", "HSI_AF7", "HSI_AF8", "HSI_TP10"]
-
-# Accepted sampling-rate subfolder names (the dataset uses 1/128 ≈ 0.0078125)
-FS_SUBFOLDER = "0.0078125"
+# The actual subfolder name used in the dataset (1/128 ≈ 0.0078125, with "S")
+FS_SUBFOLDER = "0.0078125S"
 
 # Native sampling rate of this dataset
 DATASET_FS = 128.0
+
+# Emotions that are actual trial recordings (not neutrals / baselines)
+TRIAL_EMOTIONS = {"ANGER", "FEAR", "HAPPINESS", "SADNESS"}
 
 
 # ==================================================
@@ -83,27 +80,22 @@ def _interp_nan(a: np.ndarray) -> np.ndarray:
 
 def _load_csv_channels(fpath: str):
     """
-    Load a MUSE CSV file and return the 4 raw EEG channel arrays.
+    Load a MUSE CSV and return the 4 raw EEG channel arrays.
 
-    Returns
-    -------
-    channels : list of 4 np.ndarray  (one per channel)  or  None on failure
+    Returns list of 4 np.ndarray, or None on failure.
     """
     try:
         df = pd.read_csv(fpath)
     except Exception:
         return None
 
-    # Normalise column names (strip whitespace, handle case)
     df.columns = [c.strip() for c in df.columns]
 
-    # Check all required channels are present
+    # Case-insensitive column matching
     missing = [c for c in MUSE_RAW_COLS if c not in df.columns]
     if missing:
-        # Try case-insensitive match
         col_map = {c.upper(): c for c in df.columns}
-        rename = {}
-        still_missing = []
+        rename, still_missing = {}, []
         for need in missing:
             if need.upper() in col_map:
                 rename[col_map[need.upper()]] = need
@@ -117,25 +109,16 @@ def _load_csv_channels(fpath: str):
     for col in MUSE_RAW_COLS:
         arr = pd.to_numeric(df[col], errors="coerce").to_numpy(np.float64)
         channels.append(_interp_nan(arr))
-
     return channels
 
 
 def _apply_quality_mask(channels: list, df: pd.DataFrame, L: int) -> tuple:
-    """
-    Optionally apply HSI quality filtering if HSI columns exist in the CSV.
-
-    Returns filtered channels and their new length.
-    """
+    """Apply HSI quality filtering if columns exist; otherwise just drop NaNs."""
     mask = np.ones(L, dtype=bool)
-
-    # Finite-value mask
     for ch in channels:
         mask &= np.isfinite(ch[:L])
 
-    # HSI quality mask (only if all HSI columns present)
-    hsi_present = all(c in df.columns for c in HSI_COLS)
-    if hsi_present:
+    if all(c in df.columns for c in HSI_COLS):
         for hsi_col in HSI_COLS:
             hsi = pd.to_numeric(df[hsi_col], errors="coerce").to_numpy(np.float64)[:L]
             mask &= np.isfinite(hsi) & (hsi <= 2)
@@ -151,28 +134,11 @@ def _apply_quality_mask(channels: list, df: pd.DataFrame, L: int) -> tuple:
 def apply_baseline_reduction(signal: np.ndarray,
                               baseline: np.ndarray,
                               eps: float = 1e-12) -> np.ndarray:
-    """
-    InvBase method: divide trial FFT by baseline FFT per channel.
-
-    Args
-    ----
-    signal   : (T, C) trial signal
-    baseline : (T, C) baseline signal (trimmed to same length internally)
-    eps      : division guard
-
-    Returns
-    -------
-    reduced  : (T, C) float32 baseline-reduced signal
-    """
+    """InvBase: divide trial FFT by baseline FFT per channel."""
     common = min(len(signal), len(baseline))
-    sig = signal[:common]
-    bas = baseline[:common]
-
-    FFT_s = np.fft.rfft(sig, axis=0)
-    FFT_b = np.fft.rfft(bas, axis=0)
-    FFT_r = FFT_s / (np.abs(FFT_b) + eps)
-    reduced = np.fft.irfft(FFT_r, n=common, axis=0)
-    return reduced.astype(np.float32)
+    sig, bas = signal[:common], baseline[:common]
+    FFT_r = np.fft.rfft(sig, axis=0) / (np.abs(np.fft.rfft(bas, axis=0)) + eps)
+    return np.fft.irfft(FFT_r, n=common, axis=0).astype(np.float32)
 
 
 # ==================================================
@@ -181,64 +147,91 @@ def apply_baseline_reduction(signal: np.ndarray,
 
 def find_subject_dirs(data_root: str) -> list:
     """
-    Return a sorted list of per-subject directories found under data_root.
+    Return sorted list of (subject_id, subject_dir) tuples.
 
-    Handles two layouts:
-      Layout A (raw):
-        data_root/<subject_id>/muse/EMOTION_XXX.csv
+    Handles two layouts automatically:
 
-      Layout B (preprocessed clean/unclean):
-        data_root/clean-signals/muse/0.0078125/<subject_id>/EMOTION_XXX.csv
-        data_root/unclean-signals/muse/0.0078125/<subject_id>/EMOTION_XXX.csv
+    Layout A — DATA_ROOT points directly at the folder containing
+               numbered subject sub-dirs:
+                 data_root/1/ANGER.csv
+                 data_root/103/ANGER.csv
+
+    Layout B — DATA_ROOT points one level above (e.g. clean-signals/):
+                 data_root/0.0078125S/1/ANGER.csv
+
+    In both cases we look for sub-directories whose names are numeric
+    (subject IDs are integers in this dataset).
     """
     subject_dirs = []
 
-    # Layout A — raw: each immediate child that has a 'muse' subfolder
-    for entry in sorted(os.listdir(data_root)):
-        full = os.path.join(data_root, entry)
-        if os.path.isdir(full) and os.path.isdir(os.path.join(full, "muse")):
-            subject_dirs.append(("raw", entry, os.path.join(full, "muse")))
-
-    # Layout B — preprocessed subtree
-    for signal_type in ("clean-signals", "unclean-signals"):
-        base = os.path.join(data_root, signal_type, "muse", FS_SUBFOLDER)
+    def _collect_from(base: str):
         if not os.path.isdir(base):
-            continue
+            return
         for entry in sorted(os.listdir(base)):
             full = os.path.join(base, entry)
             if os.path.isdir(full):
-                subject_dirs.append((signal_type, entry, full))
+                # Accept numeric subject IDs (1, 2, … 103, etc.)
+                if entry.isdigit():
+                    subject_dirs.append((entry, full))
 
-    return subject_dirs
+    # Layout A: data_root/<subject_id>/
+    _collect_from(data_root)
+
+    # Layout B: data_root/<FS_SUBFOLDER>/<subject_id>/
+    _collect_from(os.path.join(data_root, FS_SUBFOLDER))
+
+    # Also try clean-signals / unclean-signals one level up
+    for sig_type in ("clean-signals", "unclean-signals"):
+        _collect_from(os.path.join(data_root, sig_type, FS_SUBFOLDER))
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique = []
+    for item in subject_dirs:
+        if item[1] not in seen:
+            seen.add(item[1])
+            unique.append(item)
+    return unique
 
 
-def find_csv_files_for_subject(muse_dir: str) -> list:
-    """Return all CSV files inside a subject's muse directory."""
-    patterns = [
-        os.path.join(muse_dir, "*.csv"),
-        os.path.join(muse_dir, "**", "*.csv"),
-    ]
-    files = sorted({p for pat in patterns for p in glob.glob(pat, recursive=True)})
-    return files
+def find_csv_files_for_subject(subject_dir: str) -> list:
+    """Return all CSV files directly inside the subject directory."""
+    return sorted(glob.glob(os.path.join(subject_dir, "*.csv")))
 
 
 # ==================================================
-# EMOTION PARSING & MAPPING
+# FILENAME PARSING
 # ==================================================
 
-def parse_emotion_from_filename(fname: str) -> str | None:
+def parse_filename(fname: str) -> tuple:
     """
-    Extract the emotion label from a CSV filename.
+    Parse a CSV filename into (file_type, emotion).
 
-    Supported patterns:
-      ANGER_XXX.csv  /  HAPPINESS_XXX.csv  /  SADNESS_XXX.csv  /  FEAR_XXX.csv
-      BASELINE_XXX.csv  (returned as 'BASELINE')
+    Returns
+    -------
+    file_type : 'trial'    — a proper emotion recording  (ANGER.csv etc.)
+                'neutral'  — a neutral baseline recording (NEUTRAL_ANGER.csv etc.)
+                'unknown'  — unrecognised filename
+    emotion   : str  (e.g. 'ANGER') or None for 'unknown'
+
+    Examples
+    --------
+    'ANGER.csv'           → ('trial',   'ANGER')
+    'NEUTRAL_ANGER.csv'   → ('neutral', 'ANGER')
+    'HAPPINESS.csv'       → ('trial',   'HAPPINESS')
+    'NEUTRAL_SADNESS.csv' → ('neutral', 'SADNESS')
     """
-    name = os.path.splitext(os.path.basename(fname))[0].upper()
-    parts = name.split("_")
-    if parts:
-        return parts[0]
-    return None
+    stem = os.path.splitext(os.path.basename(fname))[0].upper()
+
+    if stem.startswith("NEUTRAL_"):
+        # e.g. NEUTRAL_ANGER  →  emotion = ANGER
+        emotion = stem[len("NEUTRAL_"):]
+        return ("neutral", emotion) if emotion in TRIAL_EMOTIONS else ("unknown", None)
+
+    if stem in TRIAL_EMOTIONS:
+        return ("trial", stem)
+
+    return ("unknown", None)
 
 
 # ==================================================
@@ -247,39 +240,42 @@ def parse_emotion_from_filename(fname: str) -> str | None:
 
 def load_baselines_for_dataset(subject_dirs: list) -> dict:
     """
-    For each subject, look for a BASELINE CSV file and load it.
+    Build a per-subject, per-emotion baseline dictionary from NEUTRAL_* files.
 
     Returns
     -------
-    baselines : dict  subject_id → (T, 4) float32 array
+    baselines : dict
+        subject_id → { emotion → (T, 4) float32 array }
+        e.g. baselines['1']['ANGER'] = array(...)
     """
-    baselines = {}
-    print("   Loading CSV baseline recordings...")
+    baselines: dict = {}
+    print("   Loading per-emotion neutral baselines (NEUTRAL_*.csv)...")
 
-    for _, subject_id, muse_dir in subject_dirs:
-        if subject_id in baselines:
-            continue
+    for subject_id, subject_dir in subject_dirs:
+        csv_files = find_csv_files_for_subject(subject_dir)
+        subj_baselines = {}
 
-        csv_files = find_csv_files_for_subject(muse_dir)
         for fpath in csv_files:
-            emotion = parse_emotion_from_filename(fpath)
-            if emotion != "BASELINE":
+            file_type, emotion = parse_filename(fpath)
+            if file_type != "neutral":
                 continue
 
             channels = _load_csv_channels(fpath)
             if channels is None:
                 continue
-
             L = min(len(ch) for ch in channels)
             if L == 0:
                 continue
 
             signal = np.stack([ch[:L] for ch in channels], axis=1).astype(np.float32)
             signal -= signal.mean(axis=0, keepdims=True)
-            baselines[subject_id] = signal
-            break  # one baseline per subject is enough
+            subj_baselines[emotion] = signal
 
-    print(f"   ✅ Loaded {len(baselines)} CSV baselines")
+        if subj_baselines:
+            baselines[subject_id] = subj_baselines
+
+    loaded = sum(len(v) for v in baselines.values())
+    print(f"   ✅ Loaded {loaded} neutral baselines across {len(baselines)} subjects")
     return baselines
 
 
@@ -287,17 +283,13 @@ def load_baselines_for_dataset(subject_dirs: list) -> dict:
 # WINDOWING
 # ==================================================
 
-def create_windows(signal: np.ndarray,
-                   win_samples: int,
-                   step_samples: int) -> list:
-    """Slice a (T, C) signal into overlapping windows of shape (win_samples, C)."""
-    windows = []
-    L = len(signal)
-    for start in range(0, L - win_samples + 1, step_samples):
-        w = signal[start: start + win_samples]
-        if len(w) == win_samples:
-            windows.append(w)
-    return windows
+def create_windows(signal: np.ndarray, win_samples: int, step_samples: int) -> list:
+    """Slice (T, C) signal into overlapping windows of shape (win_samples, C)."""
+    return [
+        signal[s: s + win_samples]
+        for s in range(0, len(signal) - win_samples + 1, step_samples)
+        if len(signal[s: s + win_samples]) == win_samples
+    ]
 
 
 # ==================================================
@@ -306,92 +298,95 @@ def create_windows(signal: np.ndarray,
 
 def load_eeg_data(data_root: str, config) -> tuple:
     """
-    Load EEG data from the CSV-based MUSE dataset.
-
-    Walks through the dataset folder structure, reads CSV files,
-    applies optional baseline reduction, windows the signals, and
-    returns arrays ready for feature extraction / model training.
+    Load EEG data from the EmoKey MUSE CSV dataset.
 
     Parameters
     ----------
     data_root : str
-        Root of the dataset, e.g. ``muse_wearable_data/raw``  or
-        ``muse_wearable_data/preprocessed/clean-signals``
+        Path to the folder that contains the numbered subject sub-directories.
+        e.g.  .../muse_wearable_data/preprocessed/clean-signals/0.0078125S
+        OR    .../muse_wearable_data/preprocessed/clean-signals
+        (both layouts are detected automatically)
+
     config : Config
-        Pipeline configuration object.
+        Pipeline configuration.  Uses:
+          config.EEG_WINDOW_SEC, config.EEG_OVERLAP,
+          config.USE_BASELINE_REDUCTION, config.MUSE_CSV_SUPERCLASS_MAP
 
     Returns
     -------
-    X_raw      : (N, T, C)  float32  — windowed raw EEG
-    y_labels   : (N,)       int64    — integer class labels
-    subject_ids: (N,)       str      — subject ID per window
-    label_to_id: dict       str→int  — label name to integer mapping
-    clip_ids   : (N,)       str      — unique recording ID per window
+    X_raw       : (N, T, 4)  float32
+    y_labels    : (N,)       int64
+    subject_ids : (N,)       str
+    label_to_id : dict       str → int
+    clip_ids    : (N,)       str
     """
     print("\n" + "=" * 80)
-    print("LOADING EEG DATA (MUSE CSV DATASET)")
+    print("LOADING EEG DATA  —  EmoKey MUSE CSV Dataset")
     print("=" * 80)
 
-    # ── Discover subject directories ──────────────────────────────────────────
+    # ── Discover subjects ─────────────────────────────────────────────────────
     subject_dirs = find_subject_dirs(data_root)
     if not subject_dirs:
         raise ValueError(
             f"No subject directories found under '{data_root}'.\n"
-            "Expected structure:  <data_root>/<subject_id>/muse/*.csv\n"
-            "  OR:  <data_root>/clean-signals/muse/0.0078125/<subject_id>/*.csv"
+            f"Expected numbered sub-folders (e.g. 1/, 2/, 103/) containing CSV files.\n"
+            f"Make sure DATA_ROOT_MUSE_CSV points to the folder with the subject IDs."
         )
+
     print(f"Found {len(subject_dirs)} subject directories")
-    for layout, sid, _ in subject_dirs[:5]:
-        print(f"   [{layout}] Subject: {sid}")
+    for sid, sdir in subject_dirs[:5]:
+        print(f"   Subject {sid:>4s}  →  {sdir}")
     if len(subject_dirs) > 5:
         print(f"   ... and {len(subject_dirs) - 5} more")
 
-    # ── Sampling rate note ─────────────────────────────────────────────────────
-    # This dataset is recorded / downsampled at 128 Hz.
-    # We override config.EEG_FS locally so windowing uses the correct value.
-    fs = DATASET_FS
-    win_samples = int(config.EEG_WINDOW_SEC * fs)
+    # ── Windowing parameters ──────────────────────────────────────────────────
+    fs           = DATASET_FS
+    win_samples  = int(config.EEG_WINDOW_SEC * fs)
     step_samples = int(win_samples * (1.0 - config.EEG_OVERLAP))
-    print(f"\n⚙️  Sampling rate : {fs} Hz  (dataset native)")
+    print(f"\n⚙️  Sampling rate : {fs} Hz")
     print(f"   Window        : {config.EEG_WINDOW_SEC}s  ({win_samples} samples)")
     print(f"   Overlap       : {config.EEG_OVERLAP * 100:.0f}%  (step = {step_samples} samples)")
 
-    # ── Load baselines ─────────────────────────────────────────────────────────
+    # ── Load baselines ────────────────────────────────────────────────────────
     baselines: dict = {}
     if config.USE_BASELINE_REDUCTION:
-        print(f"\n🔧 Baseline Reduction: ENABLED")
+        print(f"\n🔧 Baseline Reduction: ENABLED  (using NEUTRAL_<EMOTION>.csv files)")
         baselines = load_baselines_for_dataset(subject_dirs)
     else:
         print(f"\n🔧 Baseline Reduction: DISABLED")
 
-    # ── Process each subject / file ────────────────────────────────────────────
-    all_windows: list   = []
-    all_labels:  list   = []
-    all_subjects: list  = []
-    all_clip_ids: list  = []
+    # ── Process files ─────────────────────────────────────────────────────────
+    all_windows:   list = []
+    all_labels:    list = []
+    all_subjects:  list = []
+    all_clip_ids:  list = []
     reduced_count       = 0
     not_reduced_count   = 0
+    skipped             = Counter()
 
-    skipped = Counter()
-
-    for layout, subject_id, muse_dir in subject_dirs:
-        csv_files = find_csv_files_for_subject(muse_dir)
+    for subject_id, subject_dir in subject_dirs:
+        csv_files = find_csv_files_for_subject(subject_dir)
 
         for fpath in csv_files:
-            emotion = parse_emotion_from_filename(fpath)
-            if emotion is None:
-                skipped["parse_error"] += 1
+            file_type, emotion = parse_filename(fpath)
+
+            # Skip neutrals (used as baselines, not as class labels)
+            if file_type == "neutral":
+                skipped["neutral_baseline_file"] += 1
                 continue
-            if emotion == "BASELINE":
-                skipped["baseline_file"] += 1
+            if file_type == "unknown":
+                skipped["unknown_filename"] += 1
                 continue
+
+            # Must be in the superclass map
             if emotion not in config.MUSE_CSV_SUPERCLASS_MAP:
                 skipped["unknown_emotion"] += 1
                 continue
 
             superclass = config.MUSE_CSV_SUPERCLASS_MAP[emotion]
 
-            # ── Load CSV ───────────────────────────────────────────────────────
+            # ── Load channels ─────────────────────────────────────────────────
             channels = _load_csv_channels(fpath)
             if channels is None:
                 skipped["parse_error"] += 1
@@ -402,13 +397,12 @@ def load_eeg_data(data_root: str, config) -> tuple:
                 skipped["no_data"] += 1
                 continue
 
-            # ── Quality filtering ──────────────────────────────────────────────
+            # ── Quality filtering ─────────────────────────────────────────────
             try:
                 df_raw = pd.read_csv(fpath)
                 df_raw.columns = [c.strip() for c in df_raw.columns]
-                channels_trimmed = [ch[:L] for ch in channels]
                 channels_filtered, L_filt = _apply_quality_mask(
-                    channels_trimmed, df_raw, L
+                    [ch[:L] for ch in channels], df_raw, L
                 )
             except Exception:
                 channels_filtered = [ch[:L] for ch in channels]
@@ -418,18 +412,22 @@ def load_eeg_data(data_root: str, config) -> tuple:
                 skipped["insufficient_length"] += 1
                 continue
 
-            # ── Build (T, 4) signal ────────────────────────────────────────────
+            # ── Build signal array ────────────────────────────────────────────
             signal = np.stack(channels_filtered, axis=1).astype(np.float32)
             signal -= signal.mean(axis=0, keepdims=True)
 
-            # ── Baseline reduction ─────────────────────────────────────────────
-            if config.USE_BASELINE_REDUCTION and subject_id in baselines:
-                signal = apply_baseline_reduction(signal, baselines[subject_id])
+            # ── Per-emotion baseline reduction ────────────────────────────────
+            # Use NEUTRAL_<EMOTION>.csv as baseline for this specific emotion
+            if (config.USE_BASELINE_REDUCTION
+                    and subject_id in baselines
+                    and emotion in baselines[subject_id]):
+                baseline_sig = baselines[subject_id][emotion]
+                signal = apply_baseline_reduction(signal, baseline_sig)
                 reduced_count += 1
             else:
                 not_reduced_count += 1
 
-            # ── Windowing ──────────────────────────────────────────────────────
+            # ── Window ───────────────────────────────────────────────────────
             windows = create_windows(signal, win_samples, step_samples)
             if not windows:
                 skipped["insufficient_length"] += 1
@@ -442,7 +440,7 @@ def load_eeg_data(data_root: str, config) -> tuple:
                 all_subjects.append(subject_id)
                 all_clip_ids.append(clip_id)
 
-    # ── Summary ────────────────────────────────────────────────────────────────
+    # ── Summary ───────────────────────────────────────────────────────────────
     print(f"\n📊 Processing Summary:")
     print(f"   Subjects processed : {len(subject_dirs)}")
     print(f"   Windows extracted  : {len(all_windows)}")
@@ -453,20 +451,21 @@ def load_eeg_data(data_root: str, config) -> tuple:
 
     if not all_windows:
         raise ValueError(
-            "No valid EEG windows extracted from the MUSE CSV dataset.\n"
+            "No valid EEG windows extracted.\n"
             f"Searched: {data_root}\n"
-            "Check that DATA_ROOT points to a folder containing subject sub-directories."
+            "Tip: Make sure DATA_ROOT_MUSE_CSV ends with the folder that contains "
+            "the numbered subject sub-directories (e.g. .../0.0078125S)."
         )
 
-    # ── Assemble arrays ────────────────────────────────────────────────────────
-    X_raw       = np.stack(all_windows).astype(np.float32)      # (N, T, 4)
+    # ── Assemble output arrays ─────────────────────────────────────────────────
+    X_raw       = np.stack(all_windows).astype(np.float32)
     label_list  = sorted(set(all_labels))
     label_to_id = {lab: i for i, lab in enumerate(label_list)}
     y_labels    = np.array([label_to_id[l] for l in all_labels], dtype=np.int64)
     subject_ids = np.array(all_subjects)
     clip_ids    = np.array(all_clip_ids)
 
-    print(f"\n✅ MUSE CSV data loaded: {X_raw.shape}  (N, T, C)")
+    print(f"\n✅ EmoKey data loaded : {X_raw.shape}  (N windows, T samples, C channels)")
     print(f"   Unique subjects    : {len(np.unique(subject_ids))}")
     print(f"   Unique recordings  : {len(np.unique(clip_ids))}")
     print(f"   Label distribution : {Counter(all_labels)}")
@@ -483,19 +482,14 @@ def load_eeg_data(data_root: str, config) -> tuple:
 
 
 # ==================================================
-# DATA SPLITTING  (reuse same leak-free logic)
+# DATA SPLITTING
 # ==================================================
 
 def create_data_splits(y_labels, subject_ids, clip_ids, config,
                        train_ratio=0.70, val_ratio=0.15, test_ratio=0.15):
-    """
-    Clip-independent or subject-independent train/val/test split.
-
-    Identical strategy to ``eeg_data_loader_emognitionRaw.create_data_splits``
-    so the rest of the pipeline is unaffected.
-    """
+    """Leak-free train/val/test split — identical interface to the EmOgnition loader."""
     print("\n" + "=" * 80)
-    print("CREATING DATA SPLIT — MUSE CSV (LEAK-FREE)")
+    print("CREATING DATA SPLIT — EmoKey MUSE CSV (LEAK-FREE)")
     print("=" * 80)
 
     if config.SUBJECT_INDEPENDENT:
