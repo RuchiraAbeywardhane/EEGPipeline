@@ -145,53 +145,98 @@ def apply_baseline_reduction(signal: np.ndarray,
 # FILE DISCOVERY
 # ==================================================
 
+def _has_numeric_subdirs_with_csvs(folder: str) -> bool:
+    """
+    Return True if `folder` contains at least one numeric sub-directory
+    that itself contains at least one CSV file.  This is the signature of
+    the subject-ID level in the EmoKey dataset.
+    """
+    try:
+        entries = os.listdir(folder)
+    except PermissionError:
+        return False
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        subdir = os.path.join(folder, entry)
+        if not os.path.isdir(subdir):
+            continue
+        if glob.glob(os.path.join(subdir, "*.csv")):
+            return True
+    return False
+
+
+def _find_subject_root(start: str, max_depth: int = 6) -> str | None:
+    """
+    Walk downward from `start` (BFS, up to `max_depth` levels) and return
+    the first directory that passes `_has_numeric_subdirs_with_csvs`.
+
+    This lets the loader work regardless of the Kaggle dataset slug or
+    how many wrapper folders sit above the actual data.
+    """
+    from collections import deque
+    queue = deque([(start, 0)])
+    while queue:
+        current, depth = queue.popleft()
+        if _has_numeric_subdirs_with_csvs(current):
+            return current
+        if depth >= max_depth:
+            continue
+        try:
+            children = sorted(os.listdir(current))
+        except PermissionError:
+            continue
+        for child in children:
+            full = os.path.join(current, child)
+            if os.path.isdir(full):
+                queue.append((full, depth + 1))
+    return None
+
+
 def find_subject_dirs(data_root: str) -> list:
     """
-    Return sorted list of (subject_id, subject_dir) tuples.
+    Return a sorted list of (subject_id, subject_dir) tuples.
 
-    Handles two layouts automatically:
+    Strategy
+    --------
+    1. Try `data_root` itself (already points at the right level).
+    2. If that finds nothing, recursively search downward through the
+       directory tree (BFS, max 6 levels) for a folder that contains
+       numeric sub-directories with CSV files.
 
-    Layout A — DATA_ROOT points directly at the folder containing
-               numbered subject sub-dirs:
-                 data_root/1/ANGER.csv
-                 data_root/103/ANGER.csv
-
-    Layout B — DATA_ROOT points one level above (e.g. clean-signals/):
-                 data_root/0.0078125S/1/ANGER.csv
-
-    In both cases we look for sub-directories whose names are numeric
-    (subject IDs are integers in this dataset).
+    This makes the loader resilient to any Kaggle dataset slug or extra
+    wrapper folders added by the dataset uploader.
     """
-    subject_dirs = []
-
-    def _collect_from(base: str):
-        if not os.path.isdir(base):
-            return
-        for entry in sorted(os.listdir(base)):
+    def _collect_numeric_subdirs(base: str) -> list:
+        """Collect all numeric sub-dirs of `base` that contain CSVs."""
+        result = []
+        try:
+            entries = os.listdir(base)
+        except PermissionError:
+            return result
+        for entry in sorted(entries, key=lambda x: int(x) if x.isdigit() else float('inf')):
+            if not entry.isdigit():
+                continue
             full = os.path.join(base, entry)
-            if os.path.isdir(full):
-                # Accept numeric subject IDs (1, 2, … 103, etc.)
-                if entry.isdigit():
-                    subject_dirs.append((entry, full))
+            if os.path.isdir(full) and glob.glob(os.path.join(full, "*.csv")):
+                result.append((entry, full))
+        return result
 
-    # Layout A: data_root/<subject_id>/
-    _collect_from(data_root)
+    # ── Try data_root directly ────────────────────────────────────────────────
+    subject_dirs = _collect_numeric_subdirs(data_root)
+    if subject_dirs:
+        return subject_dirs
 
-    # Layout B: data_root/<FS_SUBFOLDER>/<subject_id>/
-    _collect_from(os.path.join(data_root, FS_SUBFOLDER))
+    # ── Auto-discover: walk down until we find the right folder ───────────────
+    print(f"   ⚠️  No subject dirs found directly in '{data_root}'")
+    print(f"   🔍 Searching subdirectories for EmoKey structure ...")
 
-    # Also try clean-signals / unclean-signals one level up
-    for sig_type in ("clean-signals", "unclean-signals"):
-        _collect_from(os.path.join(data_root, sig_type, FS_SUBFOLDER))
+    found_root = _find_subject_root(data_root, max_depth=6)
+    if found_root and found_root != data_root:
+        print(f"   ✅ Found subject root: {found_root}")
+        return _collect_numeric_subdirs(found_root)
 
-    # Deduplicate while preserving order
-    seen = set()
-    unique = []
-    for item in subject_dirs:
-        if item[1] not in seen:
-            seen.add(item[1])
-            unique.append(item)
-    return unique
+    return []
 
 
 def find_csv_files_for_subject(subject_dir: str) -> list:
