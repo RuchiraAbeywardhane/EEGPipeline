@@ -28,7 +28,7 @@ class Config:
     # DATA_ROOT_MUSE_CSV must point to the folder that contains the numbered
     # subject sub-directories (1/, 2/, 103/ etc.)
     # i.e. the full path ending in .../clean-signals/0.0078125S
-    DATA_ROOT_MUSE_CSV = "/kaggle/input/emokey-dataset/muse_wearable_data/preprocessed/clean-signals/0.0078125S"
+    DATA_ROOT_MUSE_CSV = "/kaggle/input/datasets/ruchiabey/emoky-dataset/EmoKey Moments EEG Dataset (EKM-ED)/muse_wearable_data/preprocessed/clean-signals/0.0078125S"
 
     # Active DATA_ROOT (auto-selected below, or override manually)
     DATA_ROOT = DATA_ROOT_EMOGNITION   # will be overridden by validate_config()
