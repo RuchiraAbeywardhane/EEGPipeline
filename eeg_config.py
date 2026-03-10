@@ -71,10 +71,15 @@ class Config:
     # Label mappings — EmOgnition dataset (4-class emotion quadrants)
     # ------------------------------------------------------------------
     SUPERCLASS_MAP = {
-        "AMUSEMENT": "Q1",  # Positive + High Arousal
+        "HAPPINESS": "Q1",  # Positive + High Arousal
         "ANGER":     "Q2",  # Negative + High Arousal
         "SADNESS":   "Q3",  # Negative + Low Arousal
-        "NEUTRAL":   "Q4",  # Positive + Low Arousal
+        "FEAR":   "Q4",  # Positive + Low Arousal
+
+        # "AMUSEMENT": "Q1",  # Positive + High Arousal
+        # "ANGER":     "Q2",  # Negative + High Arousal
+        # "SADNESS":   "Q3",  # Negative + Low Arousal
+        # "NEUTRAL":   "Q4",  # Positive + Low Arousal
     }
 
     # ------------------------------------------------------------------
